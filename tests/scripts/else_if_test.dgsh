@@ -1,0 +1,17 @@
+# else if test
+x = 50
+
+if x > 100
+    echo!!("over 100")
+else if x > 40
+    echo!!("over 40")
+else if x > 20
+    echo!!("over 20")
+else
+    echo!!("20 or less")
+
+# One-liner version
+y = 5
+if y > 10; :echo!!("big"); else; :echo!!("small")
+
+echo!!("done")

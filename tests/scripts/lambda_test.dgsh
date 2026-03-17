@@ -1,0 +1,14 @@
+double(x)
+    return x * 2
+
+# Simple ref
+ref = @double!
+echo!!(ref(5))
+
+# Pre-bound ref
+bound = @double!(10)
+echo!!(bound())
+
+# Pre-bound echo
+say_hello = @echo!!("Hello from lambda")
+say_hello()

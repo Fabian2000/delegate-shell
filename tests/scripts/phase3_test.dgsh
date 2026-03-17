@@ -1,0 +1,60 @@
+# === SEND OPERATOR ===
+
+# Basic send with implicit $
+double(x)
+    return x * 2
+
+result = 5 -> double!($)
+echo!!("send basic: {result}")
+
+# Send with $field on object
+data = { name = "Alice", age = 30 }
+data -> echo!!("Name: {$name}")
+
+# Send chaining
+triple(x)
+    return x * 3
+
+result = 2 -> double!($) -> triple!($)
+echo!!("send chain: {result}")
+
+# === ERROR HANDLING ===
+
+# Error-tolerant assignment
+x? = int("not_a_number")
+if x?
+    echo!!("unexpected success")
+else
+    echo!!("caught error (expected)")
+
+# Successful error-tolerant
+y? = int("42")
+if y?
+    echo!!("y = {y}")
+else
+    echo!!("unexpected error")
+
+# === LAMBDAS ===
+
+# Lambda reference
+ref = @double!
+result = ref(21)
+echo!!("lambda call: {result}")
+
+# Lambda with pre-bound args
+greeter = @echo!!("Hello from lambda")
+greeter()
+
+# === ONE-LINERS ===
+z = 100
+if z > 50; :echo!!("one-liner works")
+
+# === COMPREHENSIVE ===
+numbers = [10, 20, 30, 40, 50]
+
+# For + if
+for n in numbers
+    if n > 25
+        echo!!("big: {n}")
+
+echo!!("done")

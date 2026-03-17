@@ -1,0 +1,53 @@
+# If/else
+x = 10
+if x > 5
+    echo!!("x is big")
+else
+    echo!!("x is small")
+
+# Nested if
+y = 42
+if y > 100
+    echo!!("over 100")
+else
+    if y > 40
+        echo!!("over 40")
+    else
+        echo!!("40 or less")
+
+# While loop
+count = 0
+while count < 5
+    count += 1
+echo!!("count: {count}")
+
+# For loop
+for i in 1..5
+    echo!!(i)
+
+# For loop over list
+fruits = ["apple", "banana", "cherry"]
+for f in fruits
+    echo!!("fruit: {f}")
+
+# Function definition and call
+greet(name)
+    return "Hello, {name}"
+
+result = greet!("Alice")
+echo!!(result)
+
+# Function with arithmetic
+add(a, b)
+    return a + b
+
+sum = add!(10, 20)
+echo!!("sum: {sum}")
+
+# Recursive function
+fib(n)
+    if n <= 1
+        return n
+    return fib!(n - 1) + fib!(n - 2)
+
+echo!!("fib(10): {fib!(10)}")

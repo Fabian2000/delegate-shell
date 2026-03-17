@@ -1,0 +1,16 @@
+[package]
+name = "delegate-shell"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "dgsh"
+path = "src/main.rs"
+
+[lib]
+name = "delegate_shell"
+path = "src/lib.rs"
+
+[dependencies]
+indexmap = "2.13.0"
+thiserror = "2.0.18"

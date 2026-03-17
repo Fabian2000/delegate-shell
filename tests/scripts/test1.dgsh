@@ -1,0 +1,30 @@
+# Basic variables and arithmetic
+x = 42
+y = 8
+echo(x + y)
+echo(x * 2)
+echo(x - y)
+
+# Strings
+name = "World"
+echo("Hello {name}")
+
+# Boolean
+flag = true
+echo(flag)
+
+# List
+nums = [1, 2, 3, 4, 5]
+echo(nums)
+echo(len(nums))
+
+# Object
+person = { name = "Alice", age = 30 }
+echo(person.name)
+echo(person.age)
+
+# Type checking
+echo(type(42))
+echo(type("hello"))
+echo(type(true))
+echo(type([1, 2]))

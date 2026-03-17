@@ -1,0 +1,4 @@
+# This file is imported by phase4_test.dgsh
+
+imported_greeting(name)
+    return "Hello from import, {name}"
