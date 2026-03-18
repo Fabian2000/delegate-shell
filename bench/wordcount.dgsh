@@ -1,0 +1,22 @@
+text = "the quick brown fox jumps over the lazy dog the fox the dog the the quick quick"
+words = split!!(text, " ")
+
+keys = []
+vals = []
+
+find_idx(keys, w)
+    for i in range(0, len(keys) - 1)
+        if keys[i] == w
+            return i
+    return -1
+
+for w in words
+    idx = find_idx!(keys, w)
+    if idx == -1
+        push(keys, w)
+        push(vals, 1)
+    else
+        vals[idx] = vals[idx] + 1
+
+for i in range(0, len(keys) - 1)
+    println(keys[i] + ": " + str(vals[i]))

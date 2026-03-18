@@ -1,0 +1,18 @@
+# Thread test
+
+slow_work(n)
+    sleep!!(50)
+    return n * 10
+
+# Individual waits
+t1 = thread(@slow_work(1))
+t2 = thread(@slow_work(2))
+r1 = wait(t1)
+r2 = wait(t2)
+println("Results: " + str(r1) + ", " + str(r2))
+
+# wait_all
+t3 = thread(@slow_work(3))
+t4 = thread(@slow_work(4))
+results = wait_all([t3, t4])
+println("wait_all: " + str(results))

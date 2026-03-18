@@ -1,0 +1,79 @@
+# File I/O test (Bytes + FileHandle streaming)
+
+tmp = "tests/scripts/_tmp_fileio.txt"
+
+# Setup: write a test file
+write!!(tmp, "line one\nline two\nline three\n")
+
+# Test open_file + read_line loop
+println("=== read_line loop ===")
+fh = open_file!!(tmp)
+count = 0
+reading = true
+while reading
+    free result
+    result = read_line!!(fh)
+    if type(result) == "bool"
+        reading = false
+    else
+        count = count + 1
+        println("line " + str(count) + ": " + result)
+close_file!!(fh)
+println("total lines: " + str(count))
+
+# Test open_file + read_chunk loop
+println("=== read_chunk loop ===")
+fh2 = open_file!!(tmp)
+total_bytes = 0
+chunks = 0
+chunking = true
+while chunking
+    chunk = read_chunk!!(fh2, 10)
+    sz = byte_len(chunk)
+    if sz == 0
+        chunking = false
+    else
+        total_bytes = total_bytes + sz
+        chunks = chunks + 1
+close_file!!(fh2)
+println("chunks: " + str(chunks))
+println("total bytes: " + str(total_bytes))
+
+# Test to_bytes / from_bytes
+println("=== to_bytes / from_bytes ===")
+b = to_bytes("hello world")
+println("byte_len: " + str(byte_len(b)))
+s = from_bytes(b)
+println("from_bytes: " + s)
+
+# Test byte_at
+println("=== byte_at ===")
+println("byte_at(0): " + str(byte_at(b, 0)))
+println("byte_at(1): " + str(byte_at(b, 1)))
+
+# Test byte_slice
+println("=== byte_slice ===")
+sl = byte_slice(b, 0, 5)
+println("slice 0..5: " + from_bytes(sl))
+sl2 = byte_slice(b, 6, 11)
+println("slice 6..11: " + from_bytes(sl2))
+
+# Test read_bytes / write_bytes
+println("=== read_bytes / write_bytes ===")
+tmp2 = "tests/scripts/_tmp_fileio_bin.dat"
+original = to_bytes("binary data here")
+write_bytes!!(tmp2, original)
+loaded = read_bytes!!(tmp2)
+println("read_bytes len: " + str(byte_len(loaded)))
+println("matches: " + str(from_bytes(loaded) == "binary data here"))
+
+# Test append_bytes
+println("=== append_bytes ===")
+append_bytes!!(tmp2, to_bytes(" plus more"))
+loaded2 = read_bytes!!(tmp2)
+println("after append: " + from_bytes(loaded2))
+
+# Cleanup
+rm!!(tmp)
+rm!!(tmp2)
+println("=== all tests passed ===")

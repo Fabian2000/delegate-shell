@@ -35,6 +35,14 @@ pub enum Token {
     In,
     Return,
     Import,
+    Free,
+    Use,
+    As,
+    Throw,
+    Enum,
+    Match,
+    Continue,
+    Break,
     True,
     False,
     Not, // used contextually — parser handles !expr vs fn!()
@@ -82,8 +90,13 @@ pub enum Token {
     ShlAssign,    // <<=
     ShrAssign,    // >>=
 
+    // Increment/Decrement
+    Increment, // ++
+    Decrement, // --
+
     // Special operators
     Send,              // ->
+    SafeSend,          // ?>
     Dollar,            // $ (bare)
     DollarIndex(usize),// $0, $1, ...
     DollarField(String),// $field

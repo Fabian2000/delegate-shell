@@ -111,6 +111,12 @@ pub enum ExprKind {
         right: Box<Expr>,
     },
 
+    /// Safe send: expr ?> expr — stops chain on error
+    SafeSend {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+
     /// Lambda reference: @fn or @fn(args)
     Lambda {
         name: String,
@@ -123,6 +129,12 @@ pub enum ExprKind {
 
     /// Error check: x? — returns true if x is ok, false if error
     ErrorCheck(String),
+
+    /// Error field access: x?.error, x?.message etc.
+    ErrorField {
+        name: String,
+        field: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,6 +157,32 @@ pub enum StmtKind {
         name: String,
         op: CompoundOp,
         expr: Expr,
+    },
+
+    /// list[idx] = expr
+    IndexAssign {
+        target: Expr,
+        index: Expr,
+        value: Expr,
+    },
+
+    /// obj.field = expr
+    FieldAssign {
+        target: Expr,
+        field: String,
+        value: Expr,
+    },
+
+    /// x++ or x--
+    PostIncDec {
+        name: String,
+        increment: bool, // true = ++, false = --
+    },
+
+    /// ++x or --x
+    PreIncDec {
+        name: String,
+        increment: bool,
     },
 
     /// Expression as statement (function calls, etc.)
@@ -180,6 +218,43 @@ pub enum StmtKind {
     /// return expr
     Return(Option<Expr>),
 
+    /// continue — skip to next loop iteration
+    Continue,
+
+    /// break — exit loop
+    Break,
+
     /// import "file"
     Import(String),
+
+    /// free(varname) — release a variable
+    Free(String),
+
+    /// use "path" or use "path" as alias
+    Use {
+        path: String,
+        alias: Option<String>,
+    },
+
+    /// throw expr — throw an error
+    Throw(Expr),
+
+    /// enum Name\n    VARIANT1\n    VARIANT2\n...
+    EnumDef {
+        name: String,
+        variants: Vec<String>,
+    },
+
+    /// match expr\n    pattern\n        body\n    pattern\n        body\n...
+    Match {
+        expr: Expr,
+        arms: Vec<MatchArm>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchArm {
+    /// None = wildcard (_)
+    pub pattern: Option<Expr>,
+    pub body: Vec<Stmt>,
 }

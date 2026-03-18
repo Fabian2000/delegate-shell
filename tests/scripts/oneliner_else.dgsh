@@ -1,2 +1,2 @@
-if 1 > 2; :echo!!("yes"); else; :echo!!("no")
-echo!!("done")
+if 1 > 2; :print!!("yes"); else; :print!!("no")
+print!!("done")

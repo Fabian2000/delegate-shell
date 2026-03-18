@@ -1,6 +1,12 @@
 use crate::lexer::token::{Token, SpannedToken, Span};
 use crate::parser::ast::{Expr, ExprKind, UnaryOp, DollarRef, BinOp, Resolution, StringPart};
 
+enum PostfixResult {
+    Continue,
+    Break,
+    None,
+}
+
 /// Operator precedence levels (lower = binds less tightly)
 const fn prefix_binding_power(op: &Token) -> Option<((), u8)> {
     match op {
@@ -22,7 +28,7 @@ const fn infix_binding_power(op: &Token) -> Option<(u8, u8)> {
         Token::Plus | Token::Minus => Some((18, 19)),
         Token::Star | Token::Slash | Token::Percent => Some((20, 21)),
         Token::Power => Some((23, 22)), // right-associative
-        Token::Send => Some((1, 1)),    // lowest, left-associative
+        Token::Send | Token::SafeSend => Some((1, 1)),    // lowest, left-associative
         Token::Range => Some((24, 25)), // tighter than power
         _ => None,
     }
@@ -80,98 +86,19 @@ impl<'a> ExprParser<'a> {
     ///
     /// Returns an error string if the token stream contains invalid syntax.
     pub fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, String> {
-        // Parse prefix / atom
         let mut lhs = self.parse_atom()?;
 
         loop {
             // Postfix: function call, indexing, field access
-            match self.peek() {
-                Token::LParen => {
-                    // This is a call on the result, e.g., expr(args)
-                    // Only valid if lhs is an Ident
-                    // Actually for chained calls we handle this differently
-                    break;
-                }
-                Token::Question => {
-                    // x? — error check expression
-                    if let ExprKind::Ident(name) = &lhs.kind {
-                        let name = name.clone();
-                        let span_end = self.peek_span().end;
-                        self.advance();
-                        lhs = Expr {
-                            kind: ExprKind::ErrorCheck(name),
-                            span: Span { start: lhs.span.start, end: span_end },
-                        };
-                        continue;
-                    }
-                    break;
-                }
-                Token::LBracket => {
-                    self.advance();
-                    let index = self.parse_expr(0)?;
-                    self.expect(&Token::RBracket)?;
-                    let span = Span { start: lhs.span.start, end: self.peek_span().start };
-                    lhs = Expr {
-                        kind: ExprKind::Index {
-                            expr: Box::new(lhs),
-                            index: Box::new(index),
-                        },
-                        span,
-                    };
-                    continue;
-                }
-                Token::Dot => {
-                    self.advance();
-                    if let Token::Ident(field) = self.peek().clone() {
-                        let span_start = lhs.span.start;
-                        let span_end = self.peek_span().end;
-                        self.advance();
-                        lhs = Expr {
-                            kind: ExprKind::FieldAccess {
-                                expr: Box::new(lhs),
-                                field,
-                            },
-                            span: Span { start: span_start, end: span_end },
-                        };
-                        continue;
-                    }
-                    return Err(format!("Expected field name after '.', got {:?}", self.peek()));
-                }
-                _ => {}
+            match self.try_parse_postfix(&mut lhs)? {
+                PostfixResult::Continue => continue,
+                PostfixResult::Break => break,
+                PostfixResult::None => {}
             }
 
             // Infix operators
-            let op = self.peek().clone();
-            if let Some((l_bp, r_bp)) = infix_binding_power(&op) {
-                if l_bp < min_bp {
-                    break;
-                }
-                self.advance();
-
-                let rhs = self.parse_expr(r_bp)?;
-                let span = Span { start: lhs.span.start, end: rhs.span.end };
-
-                let kind = match op {
-                    Token::Send => ExprKind::Send {
-                        left: Box::new(lhs),
-                        right: Box::new(rhs),
-                    },
-                    Token::Range => ExprKind::Range {
-                        start: Box::new(lhs),
-                        end: Box::new(rhs),
-                    },
-                    _ => {
-                        let bin_op = token_to_binop(&op).ok_or_else(|| {
-                            format!("Unknown binary operator: {op:?}")
-                        })?;
-                        ExprKind::BinaryOp {
-                            left: Box::new(lhs),
-                            op: bin_op,
-                            right: Box::new(rhs),
-                        }
-                    }
-                };
-                lhs = Expr { kind, span };
+            if let Some(new_lhs) = self.try_parse_infix(lhs.clone(), min_bp)? {
+                lhs = new_lhs;
                 continue;
             }
 
@@ -179,6 +106,112 @@ impl<'a> ExprParser<'a> {
         }
 
         Ok(lhs)
+    }
+
+    fn try_parse_postfix(&mut self, lhs: &mut Expr) -> Result<PostfixResult, String> {
+        match self.peek() {
+            Token::LParen => Ok(PostfixResult::Break),
+            Token::Question => {
+                if let ExprKind::Ident(name) = &lhs.kind {
+                    let name = name.clone();
+                    let span_end = self.peek_span().end;
+                    self.advance();
+                    if *self.peek() == Token::Dot {
+                        self.advance();
+                        if let Token::Ident(field) = self.peek().clone() {
+                            let field_end = self.peek_span().end;
+                            self.advance();
+                            *lhs = Expr {
+                                kind: ExprKind::ErrorField { name, field },
+                                span: Span { start: lhs.span.start, end: field_end },
+                            };
+                        } else {
+                            return Err(format!("Expected field name after '?.', got {:?}", self.peek()));
+                        }
+                    } else {
+                        *lhs = Expr {
+                            kind: ExprKind::ErrorCheck(name),
+                            span: Span { start: lhs.span.start, end: span_end },
+                        };
+                    }
+                    Ok(PostfixResult::Continue)
+                } else {
+                    Ok(PostfixResult::Break)
+                }
+            }
+            Token::LBracket => {
+                self.advance();
+                let index = self.parse_expr(0)?;
+                self.expect(&Token::RBracket)?;
+                let span = Span { start: lhs.span.start, end: self.peek_span().start };
+                *lhs = Expr {
+                    kind: ExprKind::Index {
+                        expr: Box::new(lhs.clone()),
+                        index: Box::new(index),
+                    },
+                    span,
+                };
+                Ok(PostfixResult::Continue)
+            }
+            Token::Dot => {
+                self.advance();
+                if let Token::Ident(field) = self.peek().clone() {
+                    let span_start = lhs.span.start;
+                    let span_end = self.peek_span().end;
+                    self.advance();
+                    *lhs = Expr {
+                        kind: ExprKind::FieldAccess {
+                            expr: Box::new(lhs.clone()),
+                            field,
+                        },
+                        span: Span { start: span_start, end: span_end },
+                    };
+                    Ok(PostfixResult::Continue)
+                } else {
+                    Err(format!("Expected field name after '.', got {:?}", self.peek()))
+                }
+            }
+            _ => Ok(PostfixResult::None),
+        }
+    }
+
+    fn try_parse_infix(&mut self, lhs: Expr, min_bp: u8) -> Result<Option<Expr>, String> {
+        let op = self.peek().clone();
+        if let Some((l_bp, r_bp)) = infix_binding_power(&op) {
+            if l_bp < min_bp {
+                return Ok(None);
+            }
+            self.advance();
+            let rhs = self.parse_expr(r_bp)?;
+            let span = Span { start: lhs.span.start, end: rhs.span.end };
+            let kind = match op {
+                Token::Send => ExprKind::Send {
+                    left: Box::new(lhs),
+                    right: Box::new(rhs),
+                },
+                Token::SafeSend => ExprKind::SafeSend {
+                    left: Box::new(lhs),
+                    right: Box::new(rhs),
+                },
+                Token::Range => ExprKind::Range {
+                    start: Box::new(lhs),
+                    end: Box::new(rhs),
+                },
+                _ => {
+                    let bin_op = token_to_binop(&op).ok_or_else(|| {
+                        format!("Unknown binary operator: {op:?}")
+                    })?;
+                    ExprKind::BinaryOp {
+                        left: Box::new(lhs),
+                        op: bin_op,
+                        right: Box::new(rhs),
+                    }
+                }
+            };
+            Ok(Some(Expr { kind, span }))
+        } else {
+            Ok(None)
+        }
     }
 
     fn parse_atom(&mut self) -> Result<Expr, String> {

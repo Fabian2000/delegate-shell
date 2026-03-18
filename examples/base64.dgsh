@@ -1,0 +1,154 @@
+# Base64 Encoder/Decoder
+# Source: https://de.wikipedia.org/wiki/Base64
+# Ported from C# by Fabian Schlüter (MIT License)
+
+charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+padding = "="
+
+# Helper: mask to 8-bit byte
+mask(v)
+    return v & 255
+
+# Helper: mask to 6-bit
+mask6(v)
+    return v & 63
+
+# --- Encode ---
+
+b64_encode(input)
+    bytes = to_bytes(input)
+    blen = byte_len(bytes)
+    result = ""
+    paddings = 0
+
+    i = 0
+    while i < blen
+        b0 = byte_at(bytes, i)
+
+        get_six = b0 >> 2
+        rest = mask!((b0 << 6)) >> 2
+        result = result + charset[get_six]
+
+        if i + 1 >= blen
+            result = result + charset[rest]
+            paddings = 2
+            i = i + 3
+            continue
+
+        b1 = byte_at(bytes, i + 1)
+        get_four = b1 >> 4
+        free get_six
+        get_six = get_four | rest
+        rest = mask!((b1 << 4)) >> 2
+        result = result + charset[get_six]
+
+        if i + 2 >= blen
+            result = result + charset[rest]
+            paddings = 1
+            i = i + 3
+            continue
+
+        b2 = byte_at(bytes, i + 2)
+        get_two = b2 >> 6
+        free get_six
+        get_six = get_two | rest
+        rest = mask!((b2 << 2)) >> 2
+        result = result + charset[get_six]
+        result = result + charset[rest]
+
+        i = i + 3
+
+    j = 0
+    while j < paddings
+        result = result + padding
+        j++
+
+    return result
+
+# --- Helper: find char index in charset ---
+
+charset_index(c)
+    for k in range(0, 63)
+        if charset[k] == c
+            return k
+    return 0
+
+# --- Decode ---
+
+b64_decode(input)
+    str_len = len(input)
+
+    free actual_len
+    actual_len = str_len
+    k = 0
+    while k < 2
+        if input[actual_len - 1] == padding
+            actual_len = actual_len - 1
+        else
+            break
+        k++
+
+    result_bytes = []
+    i = 0
+    while i < actual_len
+        c0 = charset_index!(input[i])
+        get_eight = mask!((c0 << 2))
+
+        if i + 1 >= actual_len
+            push(result_bytes, get_eight)
+            i = i + 4
+            continue
+
+        c1 = charset_index!(input[i + 1])
+        get_two = mask!((c1 << 2)) >> 6
+        get_eight = get_eight | get_two
+        push(result_bytes, get_eight)
+
+        free get_eight
+        get_eight = mask!((c1 << 4))
+
+        if i + 2 >= actual_len
+            push(result_bytes, get_eight)
+            i = i + 4
+            continue
+
+        c2 = charset_index!(input[i + 2])
+        get_four = mask!((c2 << 2)) >> 4
+        get_eight = get_eight | get_four
+        push(result_bytes, get_eight)
+
+        free get_eight
+        get_eight = mask!((c2 << 6))
+
+        if i + 3 >= actual_len
+            push(result_bytes, get_eight)
+            i = i + 4
+            continue
+
+        c3 = charset_index!(input[i + 3])
+        get_six = mask!((c3 << 2)) >> 2
+        get_eight = get_eight | get_six
+        push(result_bytes, get_eight)
+
+        i = i + 4
+
+    # Remove trailing null bytes from padding
+    while len(result_bytes) > 0 && result_bytes[len(result_bytes) - 1] == 0
+        pop(result_bytes)
+    return from_bytes(bytes_from_list!!(result_bytes))
+
+# --- Test ---
+
+original = "Hello, World!"
+println("Original: " + original)
+
+encoded = b64_encode!(original)
+println("Encoded:  " + encoded)
+
+builtin_enc = to_base64(original)
+println("Built-in: " + builtin_enc)
+println("Match:    " + str(encoded == builtin_enc))
+
+decoded = b64_decode!(encoded)
+println("Decoded:  " + decoded)
+println("Match:    " + str(decoded == original))

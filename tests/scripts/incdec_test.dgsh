@@ -1,0 +1,27 @@
+# Post increment/decrement
+x = 5
+x++
+println("post++: " + str(x))
+x--
+x--
+println("post--: " + str(x))
+
+# Pre increment/decrement
+y = 10
+++y
+println("pre++: " + str(y))
+--y
+--y
+--y
+println("pre--: " + str(y))
+
+# In loops
+count = 0
+for i in range(0, 9)
+    count++
+println("loop count: " + str(count))
+
+# Float
+f = 1.5
+f++
+println("float++: " + str(f))

@@ -1,0 +1,30 @@
+# Filesystem test
+println("CWD: " + cwd!!())
+
+# Write and read
+write!!("tests/scripts/_tmp_test.txt", "Hello from dgsh!")
+content = read!!("tests/scripts/_tmp_test.txt")
+println("Read: " + content)
+
+# File checks
+println("exists: " + str(exists!!("tests/scripts/_tmp_test.txt")))
+println("is_file: " + str(is_file!!("tests/scripts/_tmp_test.txt")))
+println("is_dir: " + str(is_dir!!("tests/scripts")))
+println("size: " + str(filesize!!("tests/scripts/_tmp_test.txt")))
+
+# Path operations
+println("basename: " + basename!!("tests/scripts/_tmp_test.txt"))
+println("dirname: " + dirname!!("tests/scripts/_tmp_test.txt"))
+println("ext: " + ext!!("tests/scripts/_tmp_test.txt"))
+
+# List directory
+files = ls!!("tests/scripts")
+println("Files in tests/scripts: " + str(len(files)))
+
+# Glob
+dgsh_files = glob!!("tests/scripts/*.dgsh")
+println("dgsh files: " + str(len(dgsh_files)))
+
+# Cleanup
+rm!!("tests/scripts/_tmp_test.txt")
+println("Cleaned up: " + str(!exists!!("tests/scripts/_tmp_test.txt")))

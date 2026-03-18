@@ -1,0 +1,17 @@
+# dgsh: loop, string ops, arithmetic
+sum = 0
+for i in range(1, 10000)
+    sum += i
+println("Sum: " + str(sum))
+
+# String building
+result = ""
+for i in range(1, 100)
+    result = result + "x"
+println("Len: " + str(len(result)))
+
+# Array ops
+arr = []
+for i in range(1, 1000)
+    push(arr, i)
+println("Array len: " + str(len(arr)))

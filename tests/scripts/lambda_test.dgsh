@@ -3,12 +3,12 @@ double(x)
 
 # Simple ref
 ref = @double!
-echo!!(ref(5))
+print!!(ref(5))
 
 # Pre-bound ref
 bound = @double!(10)
-echo!!(bound())
+print!!(bound())
 
 # Pre-bound echo
-say_hello = @echo!!("Hello from lambda")
+say_hello = @print!!("Hello from lambda")
 say_hello()

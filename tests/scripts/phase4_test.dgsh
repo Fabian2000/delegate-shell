@@ -3,20 +3,20 @@
 # ls is an exe — returns CommandResult
 r? = ls("-la", "/tmp")
 if r?
-    echo!!("ls status: {r.status}")
-    echo!!("ls ran successfully")
+    print!!("ls status: {r.status}")
+    print!!("ls ran successfully")
 
 # === IMPORT ===
 import "tests/scripts/imported.dgsh"
-echo!!(imported_greeting("Delegate"))
+print!!(imported_greeting("Delegate"))
 
 # === ONE-LINERS ===
-x = 42; y = 10; echo!!(x + y)
+x = 42; y = 10; print!!(x + y)
 
 if x > 10
-    echo!!("x is big")
+    print!!("x is big")
 else
-    echo!!("x is small")
+    print!!("x is small")
 
 # === FULL PIPELINE ===
 double(x)
@@ -26,16 +26,16 @@ add_ten(x)
     return x + 10
 
 result = 5 -> double!($) -> add_ten!($)
-echo!!("pipeline: {result}")
+print!!("pipeline: {result}")
 
 # === OBJECT SEND ===
 user = { name = "Bob", score = 95 }
-user -> echo!!("User {$name} scored {$score}")
+user -> print!!("User {$name} scored {$score}")
 
 # === LIST OPERATIONS ===
 items = [3, 1, 4, 1, 5, 9, 2, 6]
-echo!!("length: {len(items)}")
-echo!!("contains 5: {contains(items, 5)}")
-echo!!("contains 7: {contains(items, 7)}")
+print!!("length: {len(items)}")
+print!!("contains 5: {contains(items, 5)}")
+print!!("contains 7: {contains(items, 7)}")
 
-echo!!("all tests passed")
+print!!("all tests passed")

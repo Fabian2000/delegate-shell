@@ -1,30 +1,30 @@
 # Basic variables and arithmetic
 x = 42
 y = 8
-echo(x + y)
-echo(x * 2)
-echo(x - y)
+println(x + y)
+println(x * 2)
+println(x - y)
 
 # Strings
 name = "World"
-echo("Hello {name}")
+println("Hello {name}")
 
 # Boolean
 flag = true
-echo(flag)
+println(flag)
 
 # List
 nums = [1, 2, 3, 4, 5]
-echo(nums)
-echo(len(nums))
+println(nums)
+println(len(nums))
 
 # Object
 person = { name = "Alice", age = 30 }
-echo(person.name)
-echo(person.age)
+println(person.name)
+println(person.age)
 
 # Type checking
-echo(type(42))
-echo(type("hello"))
-echo(type(true))
-echo(type([1, 2]))
+println(type(42))
+println(type("hello"))
+println(type(true))
+println(type([1, 2]))

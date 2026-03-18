@@ -1,0 +1,58 @@
+# Collections test
+
+# Define helpers first
+double(x)
+    return x * 2
+
+is_even(x)
+    return x % 2 == 0
+
+add(a, b)
+    return a + b
+
+is_big(x)
+    return x > 3
+
+is_positive(x)
+    return x > 0
+
+nums = [5, 3, 1, 4, 2]
+
+# sort, sum, min, max
+println("sorted: " + str(sort!!(nums)))
+println("sum: " + str(sum!!(nums)))
+println("min: " + str(min(nums)))
+println("max: " + str(max(nums)))
+
+# map, filter, reduce
+println("doubled: " + str(map(nums, @double)))
+println("evens: " + str(filter(nums, @is_even)))
+println("reduce sum: " + str(reduce(nums, @add, 0)))
+
+# find, index
+println("find >3: " + str(find!!(nums, @is_big)))
+println("index of 4: " + str(index(nums, 4)))
+
+# flat, unique, zip
+println("flat: " + str(flat([[1, 2], [3, 4], [5]])))
+println("unique: " + str(unique([1, 2, 2, 3, 3, 3])))
+println("zip: " + str(zip!!([1, 2, 3], ["a", "b", "c"])))
+
+# range, slice
+println("range(0,10,3): " + str(range(0, 10, 3)))
+println("slice(nums,1,3): " + str(slice(nums, 1, 3)))
+
+# insert, remove (mutable)
+items = [10, 20, 30]
+insert(items, 1, 15)
+println("after insert: " + str(items))
+removed = remove(items, 2)
+println("removed: " + str(removed) + ", list: " + str(items))
+
+# any, all, count
+println("any >3: " + str(any(nums, @is_big)))
+println("all >0: " + str(all(nums, @is_positive)))
+println("count >3: " + str(count(nums, @is_big)))
+
+# merge
+println("merge: " + str(merge({ name = "Alice" }, { age = 30 })))

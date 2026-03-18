@@ -1,0 +1,19 @@
+# Date/Time test
+n = now()
+println("now: " + str(n.year) + "-" + str(n.month) + "-" + str(n.day))
+println("unix: " + str(n.unix))
+
+ts = timestamp()
+println("timestamp: " + str(ts))
+
+formatted = date_format(ts, "%Y-%m-%d %H:%M:%S")
+println("formatted: " + formatted)
+
+parsed = date_parse("2025-01-15 10:30:00", "%Y-%m-%d %H:%M:%S")
+println("parsed: " + str(parsed))
+println("back: " + date_format(parsed, "%Y-%m-%d"))
+
+start = timestamp()
+sleep(100)
+end = timestamp()
+println("elapsed: " + str(elapsed(start, end)) + "s")

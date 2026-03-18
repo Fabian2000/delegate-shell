@@ -1,0 +1,36 @@
+### deploy_check.dgsh
+
+```
+# Deploy Readiness Check
+
+echo!!("=== Deploy Check ===")
+
+status? = git("status", "--porcelain")
+if status?
+    if len(trim(status.out)) > 0
+        echo!!("WARN: Dirty working tree")
+    else
+        echo!!("OK: Clean")
+
+branch? = git("rev-parse", "--abbrev-ref", "HEAD")
+if branch?
+    echo!!("Branch: {trim(branch.out)}")
+
+log? = git("log", "--oneline", "-1")
+if log?
+    echo!!("Commit: {trim(log.out)}")
+
+echo!!("OS: {os!!()}")
+echo!!("=== Done ===")
+```
+
+### Output
+
+```
+=== Deploy Check ===
+OK: Clean
+Branch: master
+Commit: 379838a initial commit
+OS: linux
+=== Done ===
+```

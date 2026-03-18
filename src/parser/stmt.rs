@@ -92,61 +92,135 @@ impl<'a> StmtParser<'a> {
             Token::While => self.parse_while(),
             Token::For => self.parse_for(),
             Token::Return => self.parse_return(),
+            Token::Continue => {
+                let span = self.peek_span();
+                self.advance();
+                Ok(Stmt { kind: StmtKind::Continue, span })
+            }
+            Token::Break => {
+                let span = self.peek_span();
+                self.advance();
+                Ok(Stmt { kind: StmtKind::Break, span })
+            }
             Token::Import => self.parse_import(),
-            Token::Ident(name) => {
-                // Could be: assignment, compound assign, fn def, or expr stmt
-                // Look ahead to determine
-                let saved_pos = self.pos;
-
-                self.advance(); // consume ident
-
-                // Check for ? (error-tolerant assignment)
-                let error_tolerant = if *self.peek_raw() == Token::Question {
+            Token::Free => self.parse_free(),
+            Token::Use => self.parse_use(),
+            Token::Throw => self.parse_throw(),
+            Token::Enum => self.parse_enum(),
+            Token::Match => self.parse_match(),
+            Token::Increment => {
+                // pre-increment: ++x
+                self.advance();
+                if let Token::Ident(name) = self.peek_raw().clone() {
                     self.advance();
-                    true
-                } else {
-                    false
-                };
+                    return Ok(Stmt { kind: StmtKind::PreIncDec { name, increment: true }, span });
+                }
+                Err("Expected identifier after ++".to_string())
+            }
+            Token::Decrement => {
+                // pre-decrement: --x
+                self.advance();
+                if let Token::Ident(name) = self.peek_raw().clone() {
+                    self.advance();
+                    return Ok(Stmt { kind: StmtKind::PreIncDec { name, increment: false }, span });
+                }
+                Err("Expected identifier after --".to_string())
+            }
+            Token::Ident(name) => self.parse_ident_stmt(name, span),
+            _ => {
+                let expr = self.parse_expression()?;
+                Ok(Stmt { kind: StmtKind::ExprStmt(expr), span })
+            }
+        }
+    }
 
-                match self.peek_raw().clone() {
-                    Token::Assign => {
-                        self.advance();
-                        let expr = self.parse_expression()?;
-                        Ok(Stmt {
-                            kind: StmtKind::Assign { name, error_tolerant, expr },
-                            span,
-                        })
-                    }
-                    Token::PlusAssign | Token::MinusAssign | Token::StarAssign |
-                    Token::SlashAssign | Token::PercentAssign | Token::PowerAssign |
-                    Token::BitAndAssign | Token::BitOrAssign | Token::BitXorAssign |
-                    Token::ShlAssign | Token::ShrAssign => {
-                        let op_tok = self.advance().token.clone();
-                        let op = token_to_compound_op(&op_tok)?;
-                        let expr = self.parse_expression()?;
-                        Ok(Stmt {
-                            kind: StmtKind::CompoundAssign { name, op, expr },
-                            span,
-                        })
-                    }
-                    Token::LParen => {
-                        // Could be function call (expr stmt) or function definition
-                        // Check if an Indent follows after the call
-                        self.pos = saved_pos;
-                        self.parse_possible_fn_def_or_expr()
-                    }
-                    _ => {
-                        // Just an identifier expression (or error-tolerant check)
-                        if error_tolerant {
-                            return Err("'?' requires an assignment (x? = ...)".to_string());
+    fn parse_ident_stmt(&mut self, name: String, span: Span) -> Result<Stmt, String> {
+        // Could be: assignment, compound assign, fn def, post inc/dec, or expr stmt
+        let saved_pos = self.pos;
+
+        self.advance(); // consume ident
+
+        // Check for post-increment/decrement: x++ or x--
+        match self.peek_raw() {
+            Token::Increment => {
+                self.advance();
+                return Ok(Stmt { kind: StmtKind::PostIncDec { name, increment: true }, span });
+            }
+            Token::Decrement => {
+                self.advance();
+                return Ok(Stmt { kind: StmtKind::PostIncDec { name, increment: false }, span });
+            }
+            _ => {}
+        }
+
+        // Check for ? (error-tolerant assignment)
+        let error_tolerant = if *self.peek_raw() == Token::Question {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        let peeked = self.peek_raw().clone();
+        match peeked {
+            Token::Assign => {
+                self.advance();
+                let expr = self.parse_expression()?;
+                Ok(Stmt {
+                    kind: StmtKind::Assign { name, error_tolerant, expr },
+                    span,
+                })
+            }
+            Token::PlusAssign | Token::MinusAssign | Token::StarAssign |
+            Token::SlashAssign | Token::PercentAssign | Token::PowerAssign |
+            Token::BitAndAssign | Token::BitOrAssign | Token::BitXorAssign |
+            Token::ShlAssign | Token::ShrAssign => {
+                let op_tok = self.advance().token.clone();
+                let op = token_to_compound_op(&op_tok)?;
+                let expr = self.parse_expression()?;
+                Ok(Stmt {
+                    kind: StmtKind::CompoundAssign { name, op, expr },
+                    span,
+                })
+            }
+            Token::LParen => {
+                self.pos = saved_pos;
+                self.parse_possible_fn_def_or_expr()
+            }
+            Token::Bang => {
+                self.pos = saved_pos;
+                let expr = self.parse_expression()?;
+                Ok(Stmt { kind: StmtKind::ExprStmt(expr), span })
+            }
+            Token::LBracket | Token::Dot if !error_tolerant => {
+                self.pos = saved_pos;
+                let expr = self.parse_expression()?;
+                if *self.peek_raw() == Token::Assign {
+                    self.advance();
+                    let value = self.parse_expression()?;
+                    match expr.kind {
+                        ExprKind::Index { expr: target, index } => {
+                            return Ok(Stmt {
+                                kind: StmtKind::IndexAssign { target: *target, index: *index, value },
+                                span,
+                            });
                         }
-                        self.pos = saved_pos;
-                        let expr = self.parse_expression()?;
-                        Ok(Stmt { kind: StmtKind::ExprStmt(expr), span })
+                        ExprKind::FieldAccess { expr: target, field } => {
+                            return Ok(Stmt {
+                                kind: StmtKind::FieldAssign { target: *target, field, value },
+                                span,
+                            });
+                        }
+                        _ => return Err("Invalid assignment target".to_string()),
                     }
                 }
+                Ok(Stmt { kind: StmtKind::ExprStmt(expr), span })
             }
             _ => {
+                if error_tolerant {
+                    return Err("'?' requires an assignment (x? = ...)".to_string());
+                }
+                self.pos = saved_pos;
                 let expr = self.parse_expression()?;
                 Ok(Stmt { kind: StmtKind::ExprStmt(expr), span })
             }
@@ -303,6 +377,181 @@ impl<'a> StmtParser<'a> {
             Err("Import path must be a simple string literal".to_string())
         } else {
             Err(format!("Expected string after 'import', got {:?}", self.peek_raw()))
+        }
+    }
+
+    fn parse_match(&mut self) -> Result<Stmt, String> {
+        let span = self.peek_span();
+        self.advance(); // consume 'match'
+
+        let expr = self.parse_expression()?;
+
+        // Expect newline + indent
+        if *self.peek_raw() != Token::Newline {
+            return Err("Expected newline after match expression".to_string());
+        }
+        self.advance();
+        if *self.peek_raw() != Token::Indent {
+            return Err("Expected indented block with match arms".to_string());
+        }
+        self.advance();
+
+        let mut arms = Vec::new();
+        loop {
+            match self.peek_raw().clone() {
+                Token::Dedent | Token::Eof => {
+                    if *self.peek_raw() == Token::Dedent {
+                        self.advance();
+                    }
+                    break;
+                }
+                _ => {
+                    // Parse pattern: _ for wildcard, or an expression
+                    let pattern = if let Token::Ident(ref name) = self.peek_raw().clone() {
+                        if name == "_" {
+                            self.advance();
+                            None
+                        } else {
+                            Some(self.parse_expression()?)
+                        }
+                    } else {
+                        Some(self.parse_expression()?)
+                    };
+
+                    // Expect newline + indent for body
+                    if *self.peek_raw() != Token::Newline {
+                        return Err("Expected newline after match pattern".to_string());
+                    }
+                    self.advance();
+                    if *self.peek_raw() != Token::Indent {
+                        return Err("Expected indented body for match arm".to_string());
+                    }
+                    self.advance();
+
+                    let mut body = Vec::new();
+                    loop {
+                        match self.peek_raw() {
+                            Token::Dedent | Token::Eof => {
+                                if *self.peek_raw() == Token::Dedent {
+                                    self.advance();
+                                }
+                                break;
+                            }
+                            _ => {
+                                body.push(self.parse_stmt()?);
+                                if *self.peek_raw() == Token::Newline {
+                                    self.advance();
+                                }
+                            }
+                        }
+                    }
+
+                    arms.push(crate::parser::ast::MatchArm { pattern, body });
+
+                    // Skip newline between arms
+                    if *self.peek_raw() == Token::Newline {
+                        self.advance();
+                    }
+                }
+            }
+        }
+
+        Ok(Stmt { kind: StmtKind::Match { expr, arms }, span })
+    }
+
+    fn parse_enum(&mut self) -> Result<Stmt, String> {
+        let span = self.peek_span();
+        self.advance(); // consume 'enum'
+
+        let name = if let Token::Ident(n) = self.peek_raw().clone() {
+            self.advance();
+            n
+        } else {
+            return Err(format!("Expected enum name, got {:?}", self.peek_raw()));
+        };
+
+        // Expect newline + indent
+        if *self.peek_raw() != Token::Newline {
+            return Err("Expected newline after enum name".to_string());
+        }
+        self.advance(); // consume newline
+
+        if *self.peek_raw() != Token::Indent {
+            return Err("Expected indented block with enum variants".to_string());
+        }
+        self.advance(); // consume indent
+
+        let mut variants = Vec::new();
+        loop {
+            match self.peek_raw().clone() {
+                Token::Ident(variant) => {
+                    self.advance();
+                    variants.push(variant);
+                    // Skip newline between variants
+                    if *self.peek_raw() == Token::Newline {
+                        self.advance();
+                    }
+                }
+                Token::Dedent | Token::Eof => {
+                    if *self.peek_raw() == Token::Dedent {
+                        self.advance();
+                    }
+                    break;
+                }
+                _ => return Err(format!("Expected variant name in enum, got {:?}", self.peek_raw())),
+            }
+        }
+
+        if variants.is_empty() {
+            return Err("Enum must have at least one variant".to_string());
+        }
+
+        Ok(Stmt { kind: StmtKind::EnumDef { name, variants }, span })
+    }
+
+    fn parse_throw(&mut self) -> Result<Stmt, String> {
+        let span = self.peek_span();
+        self.advance(); // consume 'throw'
+        let expr = self.parse_expression()?;
+        Ok(Stmt { kind: StmtKind::Throw(expr), span })
+    }
+
+    fn parse_use(&mut self) -> Result<Stmt, String> {
+        let span = self.peek_span();
+        self.advance(); // consume 'use'
+
+        if let Token::String(parts) = self.peek_raw().clone() {
+            self.advance();
+            if parts.len() == 1
+                && let crate::lexer::token::StringPart::Literal(path) = &parts[0]
+            {
+                let alias = if *self.peek_raw() == Token::As {
+                    self.advance(); // consume 'as'
+                    if let Token::Ident(name) = self.peek_raw().clone() {
+                        self.advance();
+                        Some(name)
+                    } else {
+                        return Err(format!("Expected identifier after 'as', got {:?}", self.peek_raw()));
+                    }
+                } else {
+                    None
+                };
+                return Ok(Stmt { kind: StmtKind::Use { path: path.clone(), alias }, span });
+            }
+            Err("Use path must be a simple string literal".to_string())
+        } else {
+            Err(format!("Expected string after 'use', got {:?}", self.peek_raw()))
+        }
+    }
+
+    fn parse_free(&mut self) -> Result<Stmt, String> {
+        let span = self.peek_span();
+        self.advance(); // consume 'free'
+        if let Token::Ident(name) = self.peek_raw().clone() {
+            self.advance();
+            Ok(Stmt { kind: StmtKind::Free(name), span })
+        } else {
+            Err(format!("Expected variable name after 'free', got {:?}", self.peek_raw()))
         }
     }
 

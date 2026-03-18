@@ -1,0 +1,6 @@
+add_ten(n)
+    return n + 10
+
+t = thread(@add_ten(5))
+r = wait(t)
+println("Result: " + str(r))

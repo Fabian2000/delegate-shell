@@ -1,0 +1,9 @@
+# Test mutable list operations
+items = [1, 2, 3]
+push(items, 4)
+push(items, 5)
+println(items)
+
+last = pop(items)
+println("Popped: {last}")
+println(items)

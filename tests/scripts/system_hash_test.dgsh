@@ -1,0 +1,18 @@
+# System extended test
+println("PID: " + str(pid()))
+println("Arch: " + arch!!())
+println("Which bash: " + which!!("bash"))
+
+env_set("DGSH_TEST", "hello")
+println("Env set: " + env!!("DGSH_TEST"))
+
+script_args = args()
+println("Args: " + str(script_args))
+
+# Hashing
+println("MD5 empty: " + md5(""))
+println("MD5 hello: " + md5("hello"))
+println("SHA256 empty: " + sha256(""))
+println("SHA256 hello: " + sha256("hello"))
+println("SHA512 hello: " + sha512("hello"))
+println("UUID: " + uuid())

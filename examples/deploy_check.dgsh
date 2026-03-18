@@ -1,21 +1,22 @@
 # Deploy Readiness Check
 
-echo!!("=== Deploy Check ===")
+print!!("=== Deploy Check ===")
 
 status? = git("status", "--porcelain")
 if status?
     if len(trim(status.out)) > 0
-        echo!!("WARN: Dirty working tree")
+        print!!("WARN: Dirty working tree")
     else
-        echo!!("OK: Clean")
+        print!!("OK: Clean")
 
 branch? = git("rev-parse", "--abbrev-ref", "HEAD")
 if branch?
-    echo!!("Branch: {trim(branch.out)}")
+    print!!("Branch: {trim(branch.out)}")
 
 log? = git("log", "--oneline", "-1")
 if log?
-    echo!!("Commit: {trim(log.out)}")
+    print!!("Commit: {trim(log.out)}")
 
-echo!!("OS: {os!!()}")
-echo!!("=== Done ===")
+print!!("OS: {os!!()}")
+print!!("=== Done ===")
+

@@ -1,71 +1,71 @@
 # Variables and arithmetic
 x = 42
 y = 8
-echo!!(x + y)
-echo!!(x * 2)
-echo!!(x - y)
-echo!!(x / y)
-echo!!(x % y)
-echo!!(2 ** 10)
+print!!(x + y)
+print!!(x * 2)
+print!!(x - y)
+print!!(x / y)
+print!!(x % y)
+print!!(2 ** 10)
 
 # Strings and interpolation
 name = "World"
-echo!!("Hello {name}")
+print!!("Hello {name}")
 
 # Boolean
 flag = true
-echo!!(flag)
-echo!!(!flag)
+print!!(flag)
+print!!(!flag)
 
 # List
 nums = [1, 2, 3, 4, 5]
-echo!!(nums)
-echo!!(len(nums))
-echo!!(nums[0])
-echo!!(nums[4])
+print!!(nums)
+print!!(len(nums))
+print!!(nums[0])
+print!!(nums[4])
 
 # Object
 person = { name = "Alice", age = 30 }
-echo!!(person.name)
-echo!!(person.age)
-echo!!(has(person, "name"))
-echo!!(has(person, "email"))
+print!!(person.name)
+print!!(person.age)
+print!!(has(person, "name"))
+print!!(has(person, "email"))
 
 # Type checking
-echo!!(type(42))
-echo!!(type("hello"))
-echo!!(type(true))
-echo!!(type([1, 2]))
-echo!!(type({ a = 1 }))
+print!!(type(42))
+print!!(type("hello"))
+print!!(type(true))
+print!!(type([1, 2]))
+print!!(type({ a = 1 }))
 
 # String operations
-echo!!(upper("hello"))
-echo!!(lower("HELLO"))
-echo!!(trim("  hello  "))
-echo!!(replace("hello world", "world", "shell"))
-echo!!(contains("hello", "ell"))
+print!!(upper("hello"))
+print!!(lower("HELLO"))
+print!!(trim("  hello  "))
+print!!(replace("hello world", "world", "shell"))
+print!!(contains("hello", "ell"))
 
 # Comparisons (type-strict)
-echo!!(1 == 1)
-echo!!(1 == 2)
-echo!!("a" == "a")
-echo!!(1 < 2)
-echo!!(2 > 1)
+print!!(1 == 1)
+print!!(1 == 2)
+print!!("a" == "a")
+print!!(1 < 2)
+print!!(2 > 1)
 
 # Bitwise
-echo!!(0b1010 & 0b1100)
-echo!!(0b1010 | 0b1100)
-echo!!(0b1010 ^ 0b1100)
-echo!!(1 << 4)
-echo!!(16 >> 2)
+print!!(0b1010 & 0b1100)
+print!!(0b1010 | 0b1100)
+print!!(0b1010 ^ 0b1100)
+print!!(1 << 4)
+print!!(16 >> 2)
 
 # Ranges
 r = 1..5
-echo!!(r)
+print!!(r)
 
 # Compound assignment
 c = 10
 c += 5
-echo!!(c)
+print!!(c)
 c *= 2
-echo!!(c)
+print!!(c)

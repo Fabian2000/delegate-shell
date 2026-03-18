@@ -4,3 +4,4 @@ pub mod interpreter;
 pub mod builtins;
 pub mod exec;
 pub mod errors;
+pub mod migrate;

@@ -1,0 +1,11 @@
+n = 50
+matrix = []
+for i in range(0, n - 1)
+    for j in range(0, n - 1)
+        push(matrix, i * n + j)
+
+sum = 0
+for i in range(0, len(matrix) - 1)
+    sum += matrix[i]
+
+println("Matrix sum: " + str(sum))

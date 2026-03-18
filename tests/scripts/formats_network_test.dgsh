@@ -1,0 +1,30 @@
+# Formats test
+obj = { name = "Alice", age = 30 }
+json = to_json(obj)
+println("JSON: " + json)
+parsed = from_json(json)
+println("Parsed name: " + parsed.name)
+
+# Base64
+encoded = to_base64("Hello World")
+println("Base64: " + encoded)
+println("Decoded: " + from_base64(encoded))
+
+# Hex
+hex = to_hex("AB")
+println("Hex: " + hex)
+println("From hex: " + from_hex(hex))
+
+# URL encode
+println("URL: " + url_encode("hello world&foo=bar"))
+println("URL decode: " + url_decode("hello%20world%26foo%3Dbar"))
+
+# CSV
+csv = "name,age\nAlice,30\nBob,25"
+rows = from_csv(csv)
+println("CSV rows: " + str(len(rows)))
+println("First: " + rows[0].name)
+
+# Network
+println("Hostname: " + hostname!!())
+println("IP: " + ip!!())
