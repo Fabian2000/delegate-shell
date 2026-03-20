@@ -11,6 +11,8 @@ pub struct Compiler {
     fn_chunks: std::collections::HashMap<String, u16>,
     /// Loop context for break/continue patching
     loop_stack: Vec<LoopCtx>,
+    /// Global variable name → slot index (numeric, for Vec-based globals in VM)
+    global_slots: std::collections::HashMap<String, u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +37,7 @@ impl Compiler {
             locals: Vec::new(),
             fn_chunks: std::collections::HashMap::new(),
             loop_stack: Vec::new(),
+            global_slots: std::collections::HashMap::new(),
         }
     }
 
@@ -44,9 +47,28 @@ impl Compiler {
             c.compile_stmt(stmt)?;
         }
         c.chunk.emit(Op::ReturnVoid, 0);
-        let top = std::mem::replace(&mut c.chunk, Chunk::new(String::new(), 0));
+        let mut top = std::mem::replace(&mut c.chunk, Chunk::new(String::new(), 0));
+        // Store global slot mapping in the top-level chunk
+        top.global_slots = c.global_slots.clone();
+        let mut names = vec![std::rc::Rc::from(""); c.global_slots.len()];
+        for (name, &slot) in &c.global_slots {
+            names[slot as usize] = std::rc::Rc::from(name.as_str());
+        }
+        top.global_names = names;
         c.chunks.insert(0, top);
         Ok(c.chunks)
+    }
+
+    /// Get or create a global slot index for a variable name.
+    fn global_slot(&mut self, name: &str) -> u16 {
+        let lower = name.to_ascii_lowercase();
+        if let Some(&slot) = self.global_slots.get(&lower) {
+            slot
+        } else {
+            let slot = self.global_slots.len() as u16;
+            self.global_slots.insert(lower, slot);
+            slot
+        }
     }
 
     fn line(&self, span: &Span) -> u32 { span.start as u32 }
@@ -65,7 +87,7 @@ impl Compiler {
                     self.compile_expr(expr)?;
                     self.set_variable(name, line);
                     // Mark variable as OK
-                    let name_idx = self.chunk.constants.add(&name.to_ascii_lowercase());
+                    let name_idx = self.global_slot(name);
                     self.chunk.emit_u16(Op::SetErrorTolerant, name_idx, line); // marks as ok
                     let end_jump = self.chunk.emit_jump(Op::TryEnd, line);
                     // Error handler target
@@ -73,7 +95,7 @@ impl Compiler {
                     // Store Void in variable and record error
                     self.chunk.emit(Op::LoadVoid, line);
                     self.set_variable(name, line);
-                    let err_name_idx = self.chunk.constants.add(&name.to_ascii_lowercase());
+                    let err_name_idx = self.global_slot(name);
                     self.chunk.emit_u16(Op::RecordError, err_name_idx, line);
                     self.chunk.patch_jump(end_jump);
                 } else {
@@ -128,7 +150,7 @@ impl Compiler {
                     self.get_variable(name, line);
                     self.chunk.emit_i64(Op::LoadInt, 1, line);
                     self.chunk.emit(if *increment { Op::Add } else { Op::Sub }, line);
-                    let idx = self.chunk.constants.add(&name.to_ascii_lowercase());
+                    let idx = self.global_slot(name);
                     self.chunk.emit_u16(Op::SetGlobal, idx, line);
                 }
             }
@@ -145,7 +167,7 @@ impl Compiler {
                 }
             }
             StmtKind::Free(name) => {
-                let idx = self.chunk.constants.add(name);
+                let idx = self.global_slot(name);
                 self.chunk.emit_u16(Op::Free, idx, line);
             }
             StmtKind::Throw(expr) => {
@@ -164,7 +186,7 @@ impl Compiler {
                 self.chunk.code.extend_from_slice(&alias_idx.to_le_bytes());
             }
             StmtKind::EnumDef { name, variants } => {
-                let name_idx = self.chunk.constants.add(name);
+                let name_idx = self.global_slot(name);
                 self.chunk.emit(Op::DefineEnum, line);
                 self.chunk.code.extend_from_slice(&name_idx.to_le_bytes());
                 self.chunk.code.extend_from_slice(&(variants.len() as u16).to_le_bytes());
@@ -294,19 +316,26 @@ impl Compiler {
                 }
             }
             ExprKind::ErrorCheck(name) => {
-                let idx = self.chunk.constants.add(name);
+                let idx = self.global_slot(name);
                 self.chunk.emit_u16(Op::ErrorCheck, idx, line);
             }
             ExprKind::ErrorField { name, field } => {
-                let name_idx = self.chunk.constants.add(name);
+                let name_idx = self.global_slot(name);
                 let field_idx = self.chunk.constants.add(field);
                 self.chunk.emit(Op::ErrorField, line);
                 self.chunk.code.extend_from_slice(&name_idx.to_le_bytes());
                 self.chunk.code.extend_from_slice(&field_idx.to_le_bytes());
             }
             ExprKind::OptionalCheck(name) => {
-                let idx = self.chunk.constants.add(name);
-                self.chunk.emit_u16(Op::OptionalCheck, idx, line);
+                if let Some(slot) = self.resolve_local(name) {
+                    // Local: just check if it's Void
+                    self.chunk.emit_u16(Op::GetLocal, slot, line);
+                    self.chunk.emit(Op::LoadVoid, line);
+                    self.chunk.emit(Op::Neq, line);
+                } else {
+                    let idx = self.global_slot(name);
+                    self.chunk.emit_u16(Op::OptionalCheck, idx, line);
+                }
             }
             ExprKind::Atomic(inner) => {
                 self.compile_expr(inner)?;
@@ -321,7 +350,7 @@ impl Compiler {
                     self.chunk.emit(Op::Dup, line);
                     self.chunk.emit_i64(Op::LoadInt, 1, line);
                     self.chunk.emit(if *increment { Op::Add } else { Op::Sub }, line);
-                    let idx = self.chunk.constants.add(&name.to_ascii_lowercase());
+                    let idx = self.global_slot(name);
                     self.chunk.emit_u16(Op::SetGlobal, idx, line);
                     // Old value is still on stack
                 }
@@ -335,7 +364,7 @@ impl Compiler {
                     self.chunk.emit_i64(Op::LoadInt, 1, line);
                     self.chunk.emit(if *increment { Op::Add } else { Op::Sub }, line);
                     self.chunk.emit(Op::Dup, line);
-                    let idx = self.chunk.constants.add(&name.to_ascii_lowercase());
+                    let idx = self.global_slot(name);
                     self.chunk.emit_u16(Op::SetGlobal, idx, line);
                     // New value is on stack
                 }
@@ -766,7 +795,7 @@ impl Compiler {
             self.chunk.emit_u16(Op::SetErrorTolerant, slot, line);
         } else {
             // Global error-tolerant — emit as SetGlobal (simplified, no error capture in VM yet)
-            let idx = self.chunk.constants.add(&name.to_ascii_lowercase());
+            let idx = self.global_slot(name);
             self.chunk.emit_u16(Op::SetGlobal, idx, line);
         }
     }
@@ -794,7 +823,7 @@ impl Compiler {
         if let Some(slot) = self.resolve_local(name) {
             self.chunk.emit_u16(Op::GetLocal, slot, line);
         } else {
-            let idx = self.chunk.constants.add(&name.to_ascii_lowercase());
+            let idx = self.global_slot(name);
             self.chunk.emit_u16(Op::GetGlobal, idx, line);
         }
     }
@@ -808,7 +837,7 @@ impl Compiler {
             self.chunk.emit_u16(Op::SetLocal, slot, line);
         } else {
             // Top-level — always use globals
-            let idx = self.chunk.constants.add(&name.to_ascii_lowercase());
+            let idx = self.global_slot(name);
             self.chunk.emit_u16(Op::SetGlobal, idx, line);
         }
     }

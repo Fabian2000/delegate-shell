@@ -1,14 +1,13 @@
-use std::rc::Rc;
 use std::process::{Command, Stdio};
 use std::io::Write;
 use indexmap::IndexMap;
-use crate::interpreter::value::{Value, new_list};
+use crate::interpreter::value::{Value, ValueKind as VK, new_list};
 use super::registry::{BuiltinRegistry, Param, Type};
 
 pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     reg.add("env", &[Param::Required(Type::String)], Type::String, |args| {
-        let Value::String(key) = &args[0] else { unreachable!() };
-        std::env::var(&**key).map(|s| Value::String(Rc::from(s)))
+        let Some(key) = args[0].as_str_ref() else { unreachable!() };
+        std::env::var(key).map(|s| Value::string_from(&s))
             .map_err(|_| format!("Environment variable '{key}' not set"))
     })?;
 
@@ -19,53 +18,53 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
             else if cfg!(target_os = "macos") { "macos" }
             else if cfg!(target_os = "linux") { "linux" }
             else { "unknown" };
-        Ok(Value::String(Rc::from(os)))
+        Ok(Value::string_from(os))
     })?;
 
     reg.add("sleep", &[Param::Required(Type::Number)], Type::Void, |args| {
-        match &args[0] {
-            Value::Int(ms) => {
-                let millis = u64::try_from(*ms).map_err(|_| format!("sleep() expects non-negative number, got {ms}"))?;
+        match args[0].kind() {
+            VK::Int(ms) => {
+                let millis = u64::try_from(ms).map_err(|_| format!("sleep() expects non-negative number, got {ms}"))?;
                 std::thread::sleep(std::time::Duration::from_millis(millis));
-                Ok(Value::Void)
+                Ok(Value::void())
             }
-            Value::Float(s) => {
-                std::thread::sleep(std::time::Duration::from_secs_f64(*s));
-                Ok(Value::Void)
+            VK::Float(s) => {
+                std::thread::sleep(std::time::Duration::from_secs_f64(s));
+                Ok(Value::void())
             }
             _ => unreachable!(),
         }
     })?;
 
     reg.add("env_set", &[Param::Required(Type::String), Param::Required(Type::String)], Type::Void, |args| {
-        let Value::String(key) = &args[0] else { unreachable!() };
-        let Value::String(val) = &args[1] else { unreachable!() };
+        let Some(key) = args[0].as_str_ref() else { unreachable!() };
+        let Some(val) = args[1].as_str_ref() else { unreachable!() };
         // SAFETY: We are single-threaded at this point in the interpreter
-        unsafe { std::env::set_var(&**key, &**val); }
-        Ok(Value::Void)
+        unsafe { std::env::set_var(key, val); }
+        Ok(Value::void())
     })?;
 
     reg.add("env_all", &[], Type::Object, |_args| {
         let mut map = IndexMap::new();
         for (key, val) in std::env::vars() {
-            map.insert(key, Value::String(Rc::from(val)));
+            map.insert(key, Value::string_from(&val));
         }
         Ok(crate::interpreter::value::new_object(map))
     })?;
 
     reg.add("pid", &[], Type::Int, |_args| {
-        Ok(Value::Int(i64::from(std::process::id())))
+        Ok(Value::int(i64::from(std::process::id())))
     })?;
 
     reg.add("arch", &[], Type::String, |_args| {
-        Ok(Value::String(Rc::from(std::env::consts::ARCH)))
+        Ok(Value::string_from(std::env::consts::ARCH))
     })?;
 
     reg.add("which", &[Param::Required(Type::String)], Type::String, builtin_which)?;
 
     reg.add("args", &[], Type::List, |_args| {
         let args: Vec<Value> = std::env::args().skip(2)
-            .map(|s| Value::String(Rc::from(s)))
+            .map(|s| Value::string_from(&s))
             .collect();
         Ok(new_list(args))
     })?;
@@ -79,13 +78,13 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
         #[cfg(unix)]
         {
             if let Ok(home) = std::env::var("HOME") {
-                return Ok(Value::String(Rc::from(home)));
+                return Ok(Value::string_from(&home));
             }
         }
         #[cfg(windows)]
         {
             if let Ok(profile) = std::env::var("USERPROFILE") {
-                return Ok(Value::String(Rc::from(profile)));
+                return Ok(Value::string_from(&profile));
             }
         }
         Err("Could not determine home directory".to_string())
@@ -99,8 +98,8 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
 fn builtin_exit(args: &[Value]) -> Result<Value, String> {
     let code = if args.is_empty() {
         0
-    } else if let Value::Int(n) = &args[0] {
-        i32::try_from(*n).unwrap_or(1)
+    } else if let Some(n) = args[0].as_int() {
+        i32::try_from(n).unwrap_or(1)
     } else {
         unreachable!()
     };
@@ -108,19 +107,19 @@ fn builtin_exit(args: &[Value]) -> Result<Value, String> {
 }
 
 fn builtin_which(args: &[Value]) -> Result<Value, String> {
-    let Value::String(name) = &args[0] else { unreachable!() };
+    let Some(name) = args[0].as_str_ref() else { unreachable!() };
     let path_var = std::env::var("PATH").unwrap_or_default();
     let sep = if cfg!(windows) { ';' } else { ':' };
     for dir in path_var.split(sep) {
-        let candidate = std::path::Path::new(dir).join(&**name);
+        let candidate = std::path::Path::new(dir).join(name);
         if candidate.is_file() {
-            return Ok(Value::String(Rc::from(candidate.to_string_lossy().to_string())));
+            return Ok(Value::string_from(&candidate.to_string_lossy()));
         }
         if cfg!(windows) {
             for ext in &["exe", "cmd", "bat", "com"] {
                 let with_ext = candidate.with_extension(ext);
                 if with_ext.is_file() {
-                    return Ok(Value::String(Rc::from(with_ext.to_string_lossy().to_string())));
+                    return Ok(Value::string_from(&with_ext.to_string_lossy()));
                 }
             }
         }
@@ -129,7 +128,7 @@ fn builtin_which(args: &[Value]) -> Result<Value, String> {
 }
 
 fn builtin_input(args: &[Value]) -> Result<Value, String> {
-    let Value::String(prompt) = &args[0] else { unreachable!() };
+    let Some(prompt) = args[0].as_str_ref() else { unreachable!() };
     eprint!("{prompt}");
     let _ = std::io::stderr().flush();
     let mut buf = String::new();
@@ -140,15 +139,15 @@ fn builtin_input(args: &[Value]) -> Result<Value, String> {
     }
     if buf.ends_with('\n') { buf.pop(); }
     if buf.ends_with('\r') { buf.pop(); }
-    Ok(Value::String(Rc::from(buf)))
+    Ok(Value::string_from(&buf))
 }
 
 fn builtin_exec(args: &[Value]) -> Result<Value, String> {
-    let Value::String(path) = &args[0] else { unreachable!() };
-    let Value::List(list) = &args[1] else { unreachable!() };
+    let Some(path) = args[0].as_str_ref() else { unreachable!() };
+    let Some(list) = args[1].as_list_ref() else { unreachable!() };
     let str_args: Vec<String> = list.borrow().iter().map(ToString::to_string).collect();
 
-    let output = Command::new(&**path)
+    let output = Command::new(path)
         .args(&str_args)
         .output()
         .map_err(|e| format!("exec('{path}'): {e}"))?;
@@ -157,27 +156,27 @@ fn builtin_exec(args: &[Value]) -> Result<Value, String> {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    Ok(Value::CommandResult {
+    Ok(Value::command_result(crate::interpreter::value::CommandResultData {
         status,
         out: stdout,
         err: stderr,
-    })
+    }))
 }
 
 fn builtin_exec_in(args: &[Value]) -> Result<Value, String> {
-    let Value::String(path) = &args[0] else { unreachable!() };
-    let Value::List(list) = &args[1] else { unreachable!() };
+    let Some(path) = args[0].as_str_ref() else { unreachable!() };
+    let Some(list) = args[1].as_list_ref() else { unreachable!() };
     let str_args: Vec<String> = list.borrow().iter().map(ToString::to_string).collect();
 
-    let stdin_data = if let Value::String(s) = &args[2] {
+    let stdin_data = if let Some(s) = args[2].as_str_ref() {
         s.to_string()
-    } else if let Value::Bytes(b) = &args[2] {
+    } else if let Some(b) = args[2].as_bytes_ref() {
         String::from_utf8_lossy(b).to_string()
     } else {
         unreachable!()
     };
 
-    let mut child = Command::new(&**path)
+    let mut child = Command::new(path)
         .args(&str_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -196,9 +195,9 @@ fn builtin_exec_in(args: &[Value]) -> Result<Value, String> {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    Ok(Value::CommandResult {
+    Ok(Value::command_result(crate::interpreter::value::CommandResultData {
         status,
         out: stdout,
         err: stderr,
-    })
+    }))
 }

@@ -15,11 +15,10 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
 }
 
 fn builtin_thread(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
-    let lambda = match &args[0] {
-        Value::Lambda { name, resolution, bound_args } => {
-            (name.clone(), *resolution, bound_args.iter().map(Value::to_sendable).collect::<Vec<_>>())
-        }
-        other => return Err(format!("thread() expects lambda, got {}", other.type_name())),
+    let lambda = if let Some(data) = args[0].as_lambda() {
+        (data.name.clone(), data.resolution, data.bound_args.iter().map(Value::to_sendable).collect::<Vec<_>>())
+    } else {
+        return Err(format!("thread() expects lambda, got {}", args[0].type_name()));
     };
 
     // Clone user functions so the thread has its own copy
@@ -42,13 +41,13 @@ fn builtin_thread(args: &[Value], interp: &mut Interpreter) -> Result<Value, Str
         result.map(|v| v.to_sendable())
     });
 
-    Ok(Value::ThreadHandle(Arc::new(Mutex::new(ThreadJoinHandle {
+    Ok(Value::thread_handle(Arc::new(Mutex::new(ThreadJoinHandle {
         handle: Some(handle),
     }))))
 }
 
 fn builtin_wait(args: &[Value]) -> Result<Value, String> {
-    if let Value::ThreadHandle(th) = &args[0] {
+    if let Some(th) = args[0].as_thread_handle() {
         let mut guard = th.lock().map_err(|e| format!("wait(): lock error: {e}"))?;
         let handle = guard.handle.take()
             .ok_or("wait(): thread already joined")?;
@@ -62,13 +61,14 @@ fn builtin_wait(args: &[Value]) -> Result<Value, String> {
 }
 
 fn builtin_wait_all(args: &[Value]) -> Result<Value, String> {
-    let handles = match &args[0] {
-        Value::List(l) => l.borrow().clone(),
-        other => return Err(format!("wait_all() expects list, got {}", other.type_name())),
+    let handles = if let Some(l) = args[0].as_list_ref() {
+        l.borrow().clone()
+    } else {
+        return Err(format!("wait_all() expects list, got {}", args[0].type_name()));
     };
     let mut results = Vec::with_capacity(handles.len());
     for h in &handles {
-        if let Value::ThreadHandle(th) = h {
+        if let Some(th) = h.as_thread_handle() {
             let mut guard = th.lock().map_err(|e| format!("wait_all(): lock error: {e}"))?;
             let handle = guard.handle.take()
                 .ok_or("wait_all(): thread already joined")?;
@@ -84,14 +84,15 @@ fn builtin_wait_all(args: &[Value]) -> Result<Value, String> {
 }
 
 fn builtin_wait_any(args: &[Value]) -> Result<Value, String> {
-    let handles = match &args[0] {
-        Value::List(l) => l.borrow().clone(),
-        other => return Err(format!("wait_any() expects list, got {}", other.type_name())),
+    let handles = if let Some(l) = args[0].as_list_ref() {
+        l.borrow().clone()
+    } else {
+        return Err(format!("wait_any() expects list, got {}", args[0].type_name()));
     };
     // Simple polling approach: check each thread until one is done
     loop {
         for h in &handles {
-            if let Value::ThreadHandle(th) = h {
+            if let Some(th) = h.as_thread_handle() {
                 let mut guard = th.lock().map_err(|e| format!("wait_any(): {e}"))?;
                 if let Some(ref handle) = guard.handle
                     && handle.is_finished()

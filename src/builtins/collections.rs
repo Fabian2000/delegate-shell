@@ -1,82 +1,83 @@
-use crate::interpreter::value::{Value, new_list, new_object};
+use crate::interpreter::value::{Value, ValueKind as VK, new_list, new_object};
 use crate::interpreter::Interpreter;
 use super::registry::{BuiltinRegistry, Param, Type};
 
 pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     // Pure functions
     reg.add("len", &[Param::Required(Type::Dyn)], Type::Int, |args| {
-        match &args[0] {
-            Value::List(l) => {
+        match args[0].kind() {
+            VK::List(l) => {
                 let len = i64::try_from(l.borrow().len()).map_err(|_| "List length overflows i64".to_string())?;
-                Ok(Value::Int(len))
+                Ok(Value::int(len))
             }
-            Value::String(s) => {
+            VK::String(s) => {
                 let len = i64::try_from(s.len()).map_err(|_| "String length overflows i64".to_string())?;
-                Ok(Value::Int(len))
+                Ok(Value::int(len))
             }
-            Value::Object(m) => {
-                let len = i64::try_from(m.borrow().fields.len()).map_err(|_| "Object length overflows i64".to_string())?;
-                Ok(Value::Int(len))
+            VK::Object(o) => {
+                let len = i64::try_from(o.borrow().fields.len()).map_err(|_| "Object length overflows i64".to_string())?;
+                Ok(Value::int(len))
             }
-            other => Err(format!("Cannot get length of {}", other.type_name())),
+            _ => Err(format!("Cannot get length of {}", args[0].type_name())),
         }
     })?;
 
     reg.add("push", &[Param::Required(Type::List), Param::Required(Type::Dyn)], Type::Void, |args| {
-        let Value::List(list) = &args[0] else { unreachable!() };
+        let Some(list) = args[0].as_list_ref() else { unreachable!() };
         list.borrow_mut().push(args[1].clone());
-        Ok(Value::Void)
+        Ok(Value::void())
     })?;
 
     reg.add("pop", &[Param::Required(Type::List)], Type::Dyn, |args| {
-        let Value::List(list) = &args[0] else { unreachable!() };
+        let Some(list) = args[0].as_list_ref() else { unreachable!() };
         let mut list = list.borrow_mut();
         if list.is_empty() {
             return Err("Cannot pop from empty list".to_string());
         }
-        Ok(list.pop().unwrap_or(Value::Void))
+        Ok(list.pop().unwrap_or_else(Value::void))
     })?;
 
     reg.add("has", &[Param::Required(Type::Object), Param::Required(Type::String)], Type::Bool, |args| {
-        let Value::Object(map) = &args[0] else { unreachable!() };
-        let Value::String(key) = &args[1] else { unreachable!() };
-        Ok(Value::Bool(map.borrow().fields.contains_key(&**key)))
+        let Some(map) = args[0].as_object_ref() else { unreachable!() };
+        let Some(key) = args[1].as_str_ref() else { unreachable!() };
+        Ok(Value::bool(map.borrow().fields.contains_key(key)))
     })?;
 
     reg.add("sort", &[Param::Required(Type::List)], Type::List, |args| {
-        let Value::List(l) = &args[0] else { unreachable!() };
+        let Some(l) = args[0].as_list_ref() else { unreachable!() };
         let mut sorted = l.borrow().clone();
         sorted.sort_by(compare_values);
         Ok(new_list(sorted))
     })?;
 
     reg.add("index", &[Param::Required(Type::List), Param::Required(Type::Dyn)], Type::Int, |args| {
-        let Value::List(l) = &args[0] else { unreachable!() };
+        let Some(l) = args[0].as_list_ref() else { unreachable!() };
         let items = l.borrow().clone();
         let needle = &args[1];
         for (i, item) in items.iter().enumerate() {
             if values_equal(item, needle) {
-                return Ok(Value::Int(i64::try_from(i).unwrap_or(i64::MAX)));
+                return Ok(Value::int(i64::try_from(i).unwrap_or(i64::MAX)));
             }
         }
-        Ok(Value::Int(-1))
+        Ok(Value::int(-1))
     })?;
 
     reg.add("flat", &[Param::Required(Type::List)], Type::List, |args| {
-        let Value::List(l) = &args[0] else { unreachable!() };
+        let Some(l) = args[0].as_list_ref() else { unreachable!() };
         let items = l.borrow().clone();
         let mut result = Vec::new();
         for item in &items {
-            match item {
-                Value::List(inner) => result.extend(inner.borrow().iter().cloned()),
-                other => result.push(other.clone()),
+            if let Some(inner) = item.as_list_ref() {
+                result.extend(inner.borrow().iter().cloned());
+            } else {
+                result.push(item.clone());
             }
         }
         Ok(new_list(result))
     })?;
 
     reg.add("unique", &[Param::Required(Type::List)], Type::List, |args| {
-        let Value::List(l) = &args[0] else { unreachable!() };
+        let Some(l) = args[0].as_list_ref() else { unreachable!() };
         let items = l.borrow().clone();
         let mut result: Vec<Value> = Vec::new();
         for item in &items {
@@ -88,8 +89,8 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     })?;
 
     reg.add("zip", &[Param::Required(Type::List), Param::Required(Type::List)], Type::List, |args| {
-        let Value::List(la) = &args[0] else { unreachable!() };
-        let Value::List(lb) = &args[1] else { unreachable!() };
+        let Some(la) = args[0].as_list_ref() else { unreachable!() };
+        let Some(lb) = args[1].as_list_ref() else { unreachable!() };
         let a = la.borrow().clone();
         let b = lb.borrow().clone();
         let result: Vec<Value> = a.iter().zip(b.iter())
@@ -101,12 +102,10 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     reg.add("range", &[Param::Required(Type::Int), Param::Required(Type::Int), Param::Optional(Type::Int)], Type::List, builtin_range)?;
 
     reg.add("slice", &[Param::Required(Type::List), Param::Required(Type::Int), Param::Required(Type::Int)], Type::List, |args| {
-        let Value::List(l) = &args[0] else { unreachable!() };
-        let Value::Int(start) = &args[1] else { unreachable!() };
-        let Value::Int(end) = &args[2] else { unreachable!() };
+        let Some(l) = args[0].as_list_ref() else { unreachable!() };
+        let Some(start) = args[1].as_int() else { unreachable!() };
+        let Some(end) = args[2].as_int() else { unreachable!() };
         let items = l.borrow().clone();
-        let start = *start;
-        let end = *end;
         let start = usize::try_from(start).map_err(|_| "Invalid start".to_string())?;
         let end = usize::try_from(end).map_err(|_| "Invalid end".to_string())?;
         let end = end.min(items.len());
@@ -115,21 +114,21 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     })?;
 
     reg.add("insert", &[Param::Required(Type::List), Param::Required(Type::Int), Param::Required(Type::Dyn)], Type::Void, |args| {
-        let Value::List(list) = &args[0] else { unreachable!() };
-        let Value::Int(i) = &args[1] else { unreachable!() };
-        let idx = usize::try_from(*i).map_err(|_| "Invalid index".to_string())?;
+        let Some(list) = args[0].as_list_ref() else { unreachable!() };
+        let Some(i) = args[1].as_int() else { unreachable!() };
+        let idx = usize::try_from(i).map_err(|_| "Invalid index".to_string())?;
         let mut list = list.borrow_mut();
         if idx > list.len() {
             return Err(format!("insert() index {idx} out of bounds (len {})", list.len()));
         }
         list.insert(idx, args[2].clone());
-        Ok(Value::Void)
+        Ok(Value::void())
     })?;
 
     reg.add("remove", &[Param::Required(Type::List), Param::Required(Type::Int)], Type::Dyn, |args| {
-        let Value::List(list) = &args[0] else { unreachable!() };
-        let Value::Int(i) = &args[1] else { unreachable!() };
-        let idx = usize::try_from(*i).map_err(|_| "Invalid index".to_string())?;
+        let Some(list) = args[0].as_list_ref() else { unreachable!() };
+        let Some(i) = args[1].as_int() else { unreachable!() };
+        let idx = usize::try_from(i).map_err(|_| "Invalid index".to_string())?;
         let mut list = list.borrow_mut();
         if idx >= list.len() {
             return Err(format!("remove() index {idx} out of bounds (len {})", list.len()));
@@ -138,8 +137,8 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     })?;
 
     reg.add("merge", &[Param::Required(Type::Object), Param::Required(Type::Object)], Type::Object, |args| {
-        let Value::Object(a) = &args[0] else { unreachable!() };
-        let Value::Object(b) = &args[1] else { unreachable!() };
+        let Some(a) = args[0].as_object_ref() else { unreachable!() };
+        let Some(b) = args[1].as_object_ref() else { unreachable!() };
         let mut merged = a.borrow().fields.clone();
         for (k, v) in b.borrow().fields.iter() {
             merged.insert(k.clone(), v.clone());
@@ -167,16 +166,14 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
 // --- Named pure functions (complex logic) ---
 
 fn builtin_range(args: &[Value]) -> Result<Value, String> {
-    let Value::Int(start) = &args[0] else { unreachable!() };
-    let Value::Int(end) = &args[1] else { unreachable!() };
+    let Some(start) = args[0].as_int() else { unreachable!() };
+    let Some(end) = args[1].as_int() else { unreachable!() };
     let step = if args.len() > 2 {
-        let Value::Int(s) = &args[2] else { unreachable!() };
-        *s
+        let Some(s) = args[2].as_int() else { unreachable!() };
+        s
     } else {
         1
     };
-    let start = *start;
-    let end = *end;
     if step == 0 {
         return Err("range() step cannot be 0".to_string());
     }
@@ -184,12 +181,12 @@ fn builtin_range(args: &[Value]) -> Result<Value, String> {
     let mut i = start;
     if step > 0 {
         while i <= end {
-            items.push(Value::Int(i));
+            items.push(Value::int(i));
             i += step;
         }
     } else {
         while i >= end {
-            items.push(Value::Int(i));
+            items.push(Value::int(i));
             i += step;
         }
     }
@@ -197,35 +194,35 @@ fn builtin_range(args: &[Value]) -> Result<Value, String> {
 }
 
 fn builtin_sum(args: &[Value]) -> Result<Value, String> {
-    let Value::List(l) = &args[0] else { unreachable!() };
+    let Some(l) = args[0].as_list_ref() else { unreachable!() };
     let items = l.borrow().clone();
     let mut int_sum: i64 = 0;
     let mut is_float = false;
     let mut float_sum: f64 = 0.0;
     for item in &items {
-        match item {
-            Value::Int(n) => {
+        match item.kind() {
+            VK::Int(n) => {
                 if is_float {
-                    float_sum += *n as f64;
+                    float_sum += n as f64;
                 } else {
                     int_sum += n;
                 }
             }
-            Value::Float(n) => {
+            VK::Float(n) => {
                 if !is_float {
                     float_sum = int_sum as f64;
                     is_float = true;
                 }
                 float_sum += n;
             }
-            other => return Err(format!("sum(): cannot add {}", other.type_name())),
+            _ => return Err(format!("sum(): cannot add {}", item.type_name())),
         }
     }
-    if is_float { Ok(Value::Float(float_sum)) } else { Ok(Value::Int(int_sum)) }
+    if is_float { Ok(Value::float(float_sum)) } else { Ok(Value::int(int_sum)) }
 }
 
 fn builtin_min(args: &[Value]) -> Result<Value, String> {
-    let Value::List(l) = &args[0] else { unreachable!() };
+    let Some(l) = args[0].as_list_ref() else { unreachable!() };
     let items = l.borrow().clone();
     if items.is_empty() {
         return Err("min() on empty list".to_string());
@@ -240,7 +237,7 @@ fn builtin_min(args: &[Value]) -> Result<Value, String> {
 }
 
 fn builtin_max(args: &[Value]) -> Result<Value, String> {
-    let Value::List(l) = &args[0] else { unreachable!() };
+    let Some(l) = args[0].as_list_ref() else { unreachable!() };
     let items = l.borrow().clone();
     if items.is_empty() {
         return Err("max() on empty list".to_string());
@@ -257,7 +254,7 @@ fn builtin_max(args: &[Value]) -> Result<Value, String> {
 // --- Named interpreter-dependent functions ---
 
 fn builtin_map(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
-    let Value::List(l) = &args[0] else { unreachable!() };
+    let Some(l) = args[0].as_list_ref() else { unreachable!() };
     let items = l.borrow().clone();
     let lambda = &args[1];
     let mut result = Vec::with_capacity(items.len());
@@ -268,7 +265,7 @@ fn builtin_map(args: &[Value], interp: &mut Interpreter) -> Result<Value, String
 }
 
 fn builtin_filter(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
-    let Value::List(l) = &args[0] else { unreachable!() };
+    let Some(l) = args[0].as_list_ref() else { unreachable!() };
     let items = l.borrow().clone();
     let lambda = &args[1];
     let mut result = Vec::new();
@@ -282,7 +279,7 @@ fn builtin_filter(args: &[Value], interp: &mut Interpreter) -> Result<Value, Str
 }
 
 fn builtin_reduce(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
-    let Value::List(l) = &args[0] else { unreachable!() };
+    let Some(l) = args[0].as_list_ref() else { unreachable!() };
     let items = l.borrow().clone();
     let lambda = &args[1];
     let mut acc = args[2].clone();
@@ -293,7 +290,7 @@ fn builtin_reduce(args: &[Value], interp: &mut Interpreter) -> Result<Value, Str
 }
 
 fn builtin_sort_by(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
-    let Value::List(l) = &args[0] else { unreachable!() };
+    let Some(l) = args[0].as_list_ref() else { unreachable!() };
     let items = l.borrow().clone();
     let lambda = &args[1];
     let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(items.len());
@@ -307,7 +304,7 @@ fn builtin_sort_by(args: &[Value], interp: &mut Interpreter) -> Result<Value, St
 }
 
 fn builtin_find(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
-    let Value::List(l) = &args[0] else { unreachable!() };
+    let Some(l) = args[0].as_list_ref() else { unreachable!() };
     let items = l.borrow().clone();
     let lambda = &args[1];
     for item in &items {
@@ -320,7 +317,7 @@ fn builtin_find(args: &[Value], interp: &mut Interpreter) -> Result<Value, Strin
 }
 
 fn builtin_count(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
-    let Value::List(l) = &args[0] else { unreachable!() };
+    let Some(l) = args[0].as_list_ref() else { unreachable!() };
     let items = l.borrow().clone();
     let lambda = &args[1];
     let mut n: i64 = 0;
@@ -330,52 +327,52 @@ fn builtin_count(args: &[Value], interp: &mut Interpreter) -> Result<Value, Stri
             n += 1;
         }
     }
-    Ok(Value::Int(n))
+    Ok(Value::int(n))
 }
 
 fn builtin_any(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
-    let Value::List(l) = &args[0] else { unreachable!() };
+    let Some(l) = args[0].as_list_ref() else { unreachable!() };
     let items = l.borrow().clone();
     let lambda = &args[1];
     for item in &items {
         let val = interp.call_lambda(lambda, vec![item.clone()])?;
         if val.is_truthy() {
-            return Ok(Value::Bool(true));
+            return Ok(Value::bool(true));
         }
     }
-    Ok(Value::Bool(false))
+    Ok(Value::bool(false))
 }
 
 fn builtin_all(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
-    let Value::List(l) = &args[0] else { unreachable!() };
+    let Some(l) = args[0].as_list_ref() else { unreachable!() };
     let items = l.borrow().clone();
     let lambda = &args[1];
     for item in &items {
         let val = interp.call_lambda(lambda, vec![item.clone()])?;
         if !val.is_truthy() {
-            return Ok(Value::Bool(false));
+            return Ok(Value::bool(false));
         }
     }
-    Ok(Value::Bool(true))
+    Ok(Value::bool(true))
 }
 
 // --- Helpers ---
 
 fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
-    match (a, b) {
-        (Value::Int(x), Value::Int(y)) => x.cmp(y),
-        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-        (Value::String(x), Value::String(y)) => x.cmp(y),
+    match (a.kind(), b.kind()) {
+        (VK::Int(x), VK::Int(y)) => x.cmp(&y),
+        (VK::Float(x), VK::Float(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+        (VK::String(x), VK::String(y)) => x.cmp(y),
         _ => std::cmp::Ordering::Equal,
     }
 }
 
 fn values_equal(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Int(x), Value::Int(y)) => x == y,
-        (Value::Float(x), Value::Float(y)) => (x - y).abs() < f64::EPSILON,
-        (Value::String(x), Value::String(y)) => x == y,
-        (Value::Bool(x), Value::Bool(y)) => x == y,
+    match (a.kind(), b.kind()) {
+        (VK::Int(x), VK::Int(y)) => x == y,
+        (VK::Float(x), VK::Float(y)) => (x - y).abs() < f64::EPSILON,
+        (VK::String(x), VK::String(y)) => x == y,
+        (VK::Bool(x), VK::Bool(y)) => x == y,
         _ => false,
     }
 }

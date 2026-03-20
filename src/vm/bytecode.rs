@@ -208,6 +208,10 @@ pub struct Chunk {
     pub param_count: u8,
     /// Function name (empty for top-level).
     pub name: String,
+    /// Global variable name → slot index. Only populated on the top-level chunk (index 0).
+    pub global_slots: HashMap<String, u16>,
+    /// Reverse mapping: global slot index → variable name. Only on top-level chunk.
+    pub global_names: Vec<Rc<str>>,
 }
 
 impl Chunk {
@@ -219,6 +223,8 @@ impl Chunk {
             line_map: Vec::new(),
             param_count,
             name,
+            global_slots: HashMap::new(),
+            global_names: Vec::new(),
         }
     }
 

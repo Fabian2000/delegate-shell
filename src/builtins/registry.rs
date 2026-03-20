@@ -46,18 +46,18 @@ impl Type {
     pub fn matches(self, val: &Value) -> bool {
         match self {
             Self::Dyn => true,
-            Self::Int => matches!(val, Value::Int(_)),
-            Self::Float => matches!(val, Value::Float(_)),
-            Self::Number => matches!(val, Value::Int(_) | Value::Float(_)),
-            Self::String => matches!(val, Value::String(_)),
-            Self::Bool => matches!(val, Value::Bool(_)),
-            Self::List => matches!(val, Value::List(_)),
-            Self::Object => matches!(val, Value::Object(_)),
-            Self::Lambda => matches!(val, Value::Lambda { .. }),
-            Self::FileHandle => matches!(val, Value::FileHandle(_)),
-            Self::Bytes => matches!(val, Value::Bytes(_)),
-            Self::ThreadHandle => matches!(val, Value::ThreadHandle(_)),
-            Self::Void => matches!(val, Value::Void),
+            Self::Int => val.is_int(),
+            Self::Float => val.is_float(),
+            Self::Number => val.is_int() || val.is_float(),
+            Self::String => val.is_string(),
+            Self::Bool => val.is_bool(),
+            Self::List => val.is_list(),
+            Self::Object => val.is_object(),
+            Self::Lambda => val.is_lambda(),
+            Self::FileHandle => val.is_file_handle(),
+            Self::Bytes => val.is_bytes(),
+            Self::ThreadHandle => val.is_thread_handle(),
+            Self::Void => val.is_void(),
         }
     }
 }
@@ -91,7 +91,7 @@ impl Param {
 struct Entry {
     params: &'static [Param],
     returns: Type,
-    handler: Box<dyn Fn(&[Value], &mut Interpreter) -> Result<Value, String>>,
+    handler: std::rc::Rc<dyn Fn(&[Value], &mut Interpreter) -> Result<Value, String>>,
 }
 
 pub struct BuiltinRegistry {
@@ -116,7 +116,7 @@ impl BuiltinRegistry {
         if self.defs.contains_key(name) {
             return Err(format!("Duplicate builtin: '{name}'"));
         }
-        self.defs.insert(name.to_owned(), Entry { params, returns, handler: Box::new(f) });
+        self.defs.insert(name.to_owned(), Entry { params, returns, handler: std::rc::Rc::new(f) });
         Ok(())
     }
 
@@ -157,13 +157,13 @@ impl BuiltinRegistry {
         self.defs.contains_key(name)
     }
 
-    /// Call a builtin by name. Returns `None` if not registered.
-    pub fn call(
+    /// Validate args and return a cloned handler. Returns `None` if not registered.
+    /// This separates the immutable lookup from the mutable call, avoiding borrow conflicts.
+    pub fn validate_and_get_handler(
         &self,
         name: &str,
         args: &[Value],
-        interpreter: &mut Interpreter,
-    ) -> Option<Result<Value, String>> {
+    ) -> Option<Result<std::rc::Rc<dyn Fn(&[Value], &mut Interpreter) -> Result<Value, String>>, String>> {
         let entry = self.defs.get(name)?;
 
         // Validate argument count
@@ -190,7 +190,20 @@ impl BuiltinRegistry {
             }
         }
 
-        Some((entry.handler)(args, interpreter))
+        Some(Ok(entry.handler.clone()))
+    }
+
+    /// Call a builtin by name. Returns `None` if not registered.
+    pub fn call(
+        &self,
+        name: &str,
+        args: &[Value],
+        interpreter: &mut Interpreter,
+    ) -> Option<Result<Value, String>> {
+        match self.validate_and_get_handler(name, args)? {
+            Ok(handler) => Some(handler(args, interpreter)),
+            Err(e) => Some(Err(e)),
+        }
     }
 }
 

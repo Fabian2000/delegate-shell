@@ -1,36 +1,35 @@
-use std::rc::Rc;
 use crate::interpreter::value::Value;
 use super::registry::{BuiltinRegistry, Param, Type};
 
 fn md5(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
     let result = md5_compute(s.as_bytes());
-    Ok(Value::String(Rc::from(bytes_to_hex(&result))))
+    Ok(Value::string_from(&bytes_to_hex(&result)))
 }
 
 fn sha256(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
     let result = sha256_compute(s.as_bytes());
-    Ok(Value::String(Rc::from(bytes_to_hex(&result))))
+    Ok(Value::string_from(&bytes_to_hex(&result)))
 }
 
 fn sha512(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
     let result = sha512_compute(s.as_bytes());
-    Ok(Value::String(Rc::from(bytes_to_hex(&result))))
+    Ok(Value::string_from(&bytes_to_hex(&result)))
 }
 
 fn uuid(_args: &[Value]) -> Result<Value, String> {
     let bytes = random_bytes_16();
     // UUID v4 format
-    Ok(Value::String(Rc::from(format!(
+    Ok(Value::string_from(&format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
         bytes[0], bytes[1], bytes[2], bytes[3],
         bytes[4], bytes[5],
         bytes[6] & 0x0F, bytes[7],
         (bytes[8] & 0x3F) | 0x80, bytes[9],
         bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
-    ))))
+    )))
 }
 
 // --- Helpers ---

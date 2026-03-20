@@ -1,51 +1,50 @@
-use crate::interpreter::value::Value;
+use crate::interpreter::value::{Value, ValueKind as VK};
 use super::registry::{BuiltinRegistry, Param, Type};
 
 fn to_f64(val: &Value) -> f64 {
-    match val {
-        Value::Int(n) => *n as f64,
-        Value::Float(n) => *n,
+    match val.kind() {
+        VK::Int(n) => n as f64,
+        VK::Float(n) => n,
         _ => unreachable!(),
     }
 }
 
 fn round(args: &[Value]) -> Result<Value, String> {
     let decimals = if args.len() == 2 {
-        let Value::Int(n) = &args[1] else { unreachable!() };
-        u32::try_from(*n).map_err(|_| format!("Invalid decimals: {n}"))?
+        let Some(n) = args[1].as_int() else { unreachable!() };
+        u32::try_from(n).map_err(|_| format!("Invalid decimals: {n}"))?
     } else {
         0
     };
-    match &args[0] {
-        Value::Float(n) => {
+    match args[0].kind() {
+        VK::Float(n) => {
             if decimals == 0 {
-                return Ok(Value::Int(n.round() as i64));
+                return Ok(Value::int(n.round() as i64));
             }
             let factor = 10_f64.powi(decimals.cast_signed());
-            Ok(Value::Float((n * factor).round() / factor))
+            Ok(Value::float((n * factor).round() / factor))
         }
-        Value::Int(n) => Ok(Value::Int(*n)),
+        VK::Int(n) => Ok(Value::int(n)),
         _ => unreachable!(),
     }
 }
 
 fn pow(args: &[Value]) -> Result<Value, String> {
-    if let (Value::Int(base), Value::Int(exp)) = (&args[0], &args[1]) {
-        u32::try_from(*exp).map_or_else(
-            |_| Ok(Value::Float((*base as f64).powf(*exp as f64))),
-            |e| Ok(Value::Int(base.pow(e))),
+    if let (Some(base), Some(exp)) = (args[0].as_int(), args[1].as_int()) {
+        u32::try_from(exp).map_or_else(
+            |_| Ok(Value::float((base as f64).powf(exp as f64))),
+            |e| Ok(Value::int(base.pow(e))),
         )
     } else {
         let base = to_f64(&args[0]);
         let exp = to_f64(&args[1]);
-        Ok(Value::Float(base.powf(exp)))
+        Ok(Value::float(base.powf(exp)))
     }
 }
 
 fn random_int(args: &[Value]) -> Result<Value, String> {
-    let Value::Int(min) = &args[0] else { unreachable!() };
-    let Value::Int(max) = &args[1] else { unreachable!() };
-    let (min, max) = (*min, *max);
+    let Some(min) = args[0].as_int() else { unreachable!() };
+    let Some(max) = args[1].as_int() else { unreachable!() };
     if min > max {
         return Err(format!("random_int(): min ({min}) > max ({max})"));
     }
@@ -57,30 +56,30 @@ fn random_int(args: &[Value]) -> Result<Value, String> {
     ).unwrap_or(0);
     let range = (max - min + 1).cast_unsigned();
     let val = min + (seed % range).cast_signed();
-    Ok(Value::Int(val))
+    Ok(Value::int(val))
 }
 
 pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     reg.add("abs_num", &[Param::Required(Type::Number)], Type::Number, |args| {
-        match &args[0] {
-            Value::Int(n) => Ok(Value::Int(n.abs())),
-            Value::Float(n) => Ok(Value::Float(n.abs())),
+        match args[0].kind() {
+            VK::Int(n) => Ok(Value::int(n.abs())),
+            VK::Float(n) => Ok(Value::float(n.abs())),
             _ => unreachable!(),
         }
     })?;
 
     reg.add("ceil", &[Param::Required(Type::Number)], Type::Int, |args| {
-        match &args[0] {
-            Value::Float(n) => Ok(Value::Int(n.ceil() as i64)),
-            Value::Int(n) => Ok(Value::Int(*n)),
+        match args[0].kind() {
+            VK::Float(n) => Ok(Value::int(n.ceil() as i64)),
+            VK::Int(n) => Ok(Value::int(n)),
             _ => unreachable!(),
         }
     })?;
 
     reg.add("floor", &[Param::Required(Type::Number)], Type::Int, |args| {
-        match &args[0] {
-            Value::Float(n) => Ok(Value::Int(n.floor() as i64)),
-            Value::Int(n) => Ok(Value::Int(*n)),
+        match args[0].kind() {
+            VK::Float(n) => Ok(Value::int(n.floor() as i64)),
+            VK::Int(n) => Ok(Value::int(n)),
             _ => unreachable!(),
         }
     })?;
@@ -92,29 +91,29 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
         if n < 0.0 {
             return Err("sqrt() of negative number".to_string());
         }
-        Ok(Value::Float(n.sqrt()))
+        Ok(Value::float(n.sqrt()))
     })?;
 
     reg.add("pow", &[Param::Required(Type::Number), Param::Required(Type::Number)], Type::Number, pow)?;
 
     reg.add("log", &[Param::Required(Type::Number)], Type::Float, |args| {
-        Ok(Value::Float(to_f64(&args[0]).ln()))
+        Ok(Value::float(to_f64(&args[0]).ln()))
     })?;
 
     reg.add("log10", &[Param::Required(Type::Number)], Type::Float, |args| {
-        Ok(Value::Float(to_f64(&args[0]).log10()))
+        Ok(Value::float(to_f64(&args[0]).log10()))
     })?;
 
     reg.add("sin", &[Param::Required(Type::Number)], Type::Float, |args| {
-        Ok(Value::Float(to_f64(&args[0]).sin()))
+        Ok(Value::float(to_f64(&args[0]).sin()))
     })?;
 
     reg.add("cos", &[Param::Required(Type::Number)], Type::Float, |args| {
-        Ok(Value::Float(to_f64(&args[0]).cos()))
+        Ok(Value::float(to_f64(&args[0]).cos()))
     })?;
 
     reg.add("tan", &[Param::Required(Type::Number)], Type::Float, |args| {
-        Ok(Value::Float(to_f64(&args[0]).tan()))
+        Ok(Value::float(to_f64(&args[0]).tan()))
     })?;
 
     reg.add("random", &[], Type::Float, |_args| {
@@ -123,17 +122,17 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
             .unwrap_or_default()
             .as_nanos();
         let val = ((seed ^ (seed >> 16)) & 0xFFFF_FFFF) as f64 / 0xFFFF_FFFF_u64 as f64;
-        Ok(Value::Float(val))
+        Ok(Value::float(val))
     })?;
 
     reg.add("random_int", &[Param::Required(Type::Int), Param::Required(Type::Int)], Type::Int, random_int)?;
 
     reg.add("pi", &[], Type::Float, |_args| {
-        Ok(Value::Float(std::f64::consts::PI))
+        Ok(Value::float(std::f64::consts::PI))
     })?;
 
     reg.add("infinity", &[], Type::Float, |_args| {
-        Ok(Value::Float(f64::INFINITY))
+        Ok(Value::float(f64::INFINITY))
     })?;
 
     Ok(())

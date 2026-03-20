@@ -1,17 +1,16 @@
-use std::rc::Rc;
 use indexmap::IndexMap;
 use crate::interpreter::value::{Value, new_object};
 use std::io::Read;
 use super::registry::{BuiltinRegistry, Param, Type};
 
 fn http_get(args: &[Value]) -> Result<Value, String> {
-    let Value::String(url) = &args[0] else { unreachable!() };
+    let Some(url) = args[0].as_str_ref() else { unreachable!() };
     let agent = ureq::Agent::new_with_defaults();
-    let mut req = agent.get(&**url);
+    let mut req = agent.get(url);
     if args.len() == 2
         && let Some(hdrs) = extract_headers(&args[1]) {
         for (k, v) in hdrs {
-            if let Value::String(val) = v { req = req.header(k, &*val); }
+            if let Some(val) = v.as_str_ref() { req = req.header(k, val); }
         }
     }
     let resp = req.call()
@@ -20,14 +19,14 @@ fn http_get(args: &[Value]) -> Result<Value, String> {
 }
 
 fn http_post(args: &[Value]) -> Result<Value, String> {
-    let Value::String(url) = &args[0] else { unreachable!() };
-    let Value::String(body) = &args[1] else { unreachable!() };
+    let Some(url) = args[0].as_str_ref() else { unreachable!() };
+    let Some(body) = args[1].as_str_ref() else { unreachable!() };
     let agent = ureq::Agent::new_with_defaults();
-    let mut req = agent.post(&**url).header("Content-Type", "application/json");
+    let mut req = agent.post(url).header("Content-Type", "application/json");
     if args.len() == 3
         && let Some(hdrs) = extract_headers(&args[2]) {
         for (k, v) in hdrs {
-            if let Value::String(val) = v { req = req.header(k, &*val); }
+            if let Some(val) = v.as_str_ref() { req = req.header(k, val); }
         }
     }
     let resp = req.send(body.as_bytes())
@@ -36,14 +35,14 @@ fn http_post(args: &[Value]) -> Result<Value, String> {
 }
 
 fn http_put(args: &[Value]) -> Result<Value, String> {
-    let Value::String(url) = &args[0] else { unreachable!() };
-    let Value::String(body) = &args[1] else { unreachable!() };
+    let Some(url) = args[0].as_str_ref() else { unreachable!() };
+    let Some(body) = args[1].as_str_ref() else { unreachable!() };
     let agent = ureq::Agent::new_with_defaults();
-    let mut req = agent.put(&**url).header("Content-Type", "application/json");
+    let mut req = agent.put(url).header("Content-Type", "application/json");
     if args.len() == 3
         && let Some(hdrs) = extract_headers(&args[2]) {
         for (k, v) in hdrs {
-            if let Value::String(val) = v { req = req.header(k, &*val); }
+            if let Some(val) = v.as_str_ref() { req = req.header(k, val); }
         }
     }
     let resp = req.send(body.as_bytes())
@@ -52,13 +51,13 @@ fn http_put(args: &[Value]) -> Result<Value, String> {
 }
 
 fn http_delete(args: &[Value]) -> Result<Value, String> {
-    let Value::String(url) = &args[0] else { unreachable!() };
+    let Some(url) = args[0].as_str_ref() else { unreachable!() };
     let agent = ureq::Agent::new_with_defaults();
-    let mut req = agent.delete(&**url);
+    let mut req = agent.delete(url);
     if args.len() == 2
         && let Some(hdrs) = extract_headers(&args[1]) {
         for (k, v) in hdrs {
-            if let Value::String(val) = v { req = req.header(k, &*val); }
+            if let Some(val) = v.as_str_ref() { req = req.header(k, val); }
         }
     }
     let resp = req.call()
@@ -67,18 +66,18 @@ fn http_delete(args: &[Value]) -> Result<Value, String> {
 }
 
 fn download(args: &[Value]) -> Result<Value, String> {
-    let Value::String(url) = &args[0] else { unreachable!() };
-    let Value::String(path) = &args[1] else { unreachable!() };
+    let Some(url) = args[0].as_str_ref() else { unreachable!() };
+    let Some(path) = args[1].as_str_ref() else { unreachable!() };
     let resp = ureq::Agent::new_with_defaults()
-        .get(&**url)
+        .get(url)
         .call()
         .map_err(|e| format!("download('{url}'): {e}"))?;
     let mut bytes = Vec::new();
     resp.into_body().as_reader().read_to_end(&mut bytes)
         .map_err(|e| format!("download('{url}'): read error: {e}"))?;
-    std::fs::write(&**path, &bytes)
+    std::fs::write(path, &bytes)
         .map_err(|e| format!("download() write '{path}': {e}"))?;
-    Ok(Value::Void)
+    Ok(Value::void())
 }
 
 fn ip(args: &[Value]) -> Result<Value, String> {
@@ -89,7 +88,7 @@ fn ip(args: &[Value]) -> Result<Value, String> {
         .map_err(|e| format!("ip(): {e}"))?;
     let addr = socket.local_addr()
         .map_err(|e| format!("ip(): {e}"))?;
-    Ok(Value::String(Rc::from(addr.ip().to_string())))
+    Ok(Value::string_from(&addr.ip().to_string()))
 }
 
 // --- Helpers ---
@@ -99,13 +98,13 @@ fn body_response(resp: ureq::http::Response<ureq::Body>) -> Value {
     let body_str = resp.into_body().read_to_string()
         .unwrap_or_default();
     let mut obj = IndexMap::new();
-    obj.insert("status".to_string(), Value::Int(i64::from(status)));
-    obj.insert("body".to_string(), Value::String(Rc::from(body_str)));
+    obj.insert("status".to_string(), Value::int(i64::from(status)));
+    obj.insert("body".to_string(), Value::string_from(&body_str));
     new_object(obj)
 }
 
 fn extract_headers(val: &Value) -> Option<IndexMap<String, Value>> {
-    if let Value::Object(rc) = val { Some(rc.borrow().fields.clone()) } else { None }
+    val.as_object_ref().map(|rc| rc.borrow().fields.clone())
 }
 
 pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
@@ -117,7 +116,7 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     reg.add("hostname", &[], Type::String, |_args| {
         let name = hostname::get()
             .map_or_else(|_| "unknown".to_string(), |n| n.to_string_lossy().to_string());
-        Ok(Value::String(Rc::from(name)))
+        Ok(Value::string_from(&name))
     })?;
     reg.add("ip", &[], Type::String, ip)?;
 

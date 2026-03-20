@@ -1,7 +1,6 @@
-use std::rc::Rc;
 use std::collections::{HashMap, HashSet};
 use indexmap::IndexMap;
-use super::value::{Value, MaybeError, ErrorInfo, new_list, new_object};
+use super::value::{Value, MaybeError, ErrorInfo, new_list, new_object, ValueKind as VK};
 use super::env::{Environment, UserFn};
 use crate::parser::ast::{
     BinOp, CompoundOp, DollarRef, Expr, ExprKind, Resolution, Stmt, StmtKind, StringPart,
@@ -248,7 +247,7 @@ impl Interpreter {
             StmtKind::EnumDef { name, variants } => {
                 let mut map = indexmap::IndexMap::new();
                 for (i, variant) in variants.iter().enumerate() {
-                    map.insert(variant.clone(), Value::Int(i64::try_from(i).unwrap_or(i64::MAX)));
+                    map.insert(variant.clone(), Value::int(i64::try_from(i).unwrap_or(i64::MAX)));
                 }
                 self.env.set(name, MaybeError::Ok(new_object(map)))?;
                 Ok(FlowSignal::None)
@@ -265,10 +264,10 @@ impl Interpreter {
         let target_val = self.eval_expr(target)?;
         let idx = self.eval_expr(index)?;
         let val = self.eval_expr(value)?;
-        match (&target_val, &idx) {
-            (Value::List(list), Value::Int(i)) => {
+        match (target_val.kind(), idx.kind()) {
+            (VK::List(list), VK::Int(i)) => {
                 let mut list = list.borrow_mut();
-                let idx = usize::try_from(*i).map_err(|_| format!("Negative index {i}"))?;
+                let idx = usize::try_from(i).map_err(|_| format!("Negative index {i}"))?;
                 if idx >= list.len() {
                     return Err(format!("Index {idx} out of bounds (len {})", list.len()));
                 }
@@ -282,35 +281,34 @@ impl Interpreter {
     fn exec_field_assign(&mut self, target: &Expr, field: &str, value: &Expr) -> Result<FlowSignal, String> {
         let target_val = self.eval_expr(target)?;
         let val = self.eval_expr(value)?;
-        match target_val {
-            Value::Object(rc) => {
-                let mut map = rc.borrow_mut();
-                if let Some(existing) = map.fields.get(field) {
-                    let old_type = existing.type_name();
-                    let new_type = val.type_name();
-                    if old_type != new_type {
-                        return Err(format!(
-                            "Type mismatch: field '{field}' is {old_type}, cannot assign {new_type}"
-                        ));
-                    }
+        if let Some(rc) = target_val.as_object_ref() {
+            let mut map = rc.borrow_mut();
+            if let Some(existing) = map.fields.get(field) {
+                let old_type = existing.type_name();
+                let new_type = val.type_name();
+                if old_type != new_type {
+                    return Err(format!(
+                        "Type mismatch: field '{field}' is {old_type}, cannot assign {new_type}"
+                    ));
                 }
-                map.fields.insert(field.to_owned(), val);
             }
-            _ => return Err(format!("Cannot field-assign on {}", target_val.type_name())),
+            map.fields.insert(field.to_owned(), val);
+        } else {
+            return Err(format!("Cannot field-assign on {}", target_val.type_name()));
         }
         Ok(FlowSignal::None)
     }
 
     fn exec_inc_dec(&mut self, name: &str, increment: bool) -> Result<FlowSignal, String> {
         let current = self.get_var(name)?;
-        match current {
-            Value::Int(n) => {
+        match current.kind() {
+            VK::Int(n) => {
                 let new_val = if increment { n + 1 } else { n - 1 };
-                self.env.set(name, MaybeError::Ok(Value::Int(new_val)))?;
+                self.env.set(name, MaybeError::Ok(Value::int(new_val)))?;
             }
-            Value::Float(n) => {
+            VK::Float(n) => {
                 let new_val = if increment { n + 1.0 } else { n - 1.0 };
-                self.env.set(name, MaybeError::Ok(Value::Float(new_val)))?;
+                self.env.set(name, MaybeError::Ok(Value::float(new_val)))?;
             }
             _ => return Err(format!("Cannot increment/decrement {}", current.type_name())),
         }
@@ -335,9 +333,9 @@ impl Interpreter {
 
     /// Compute the incremented/decremented value without modifying state.
     fn compute_inc_dec(val: &Value, increment: bool) -> Result<Value, String> {
-        match val {
-            Value::Int(n) => Ok(Value::Int(if increment { n + 1 } else { n - 1 })),
-            Value::Float(n) => Ok(Value::Float(if increment { n + 1.0 } else { n - 1.0 })),
+        match val.kind() {
+            VK::Int(n) => Ok(Value::int(if increment { n + 1 } else { n - 1 })),
+            VK::Float(n) => Ok(Value::float(if increment { n + 1.0 } else { n - 1.0 })),
             _ => Err(format!("Cannot increment/decrement {}", val.type_name())),
         }
     }
@@ -377,12 +375,14 @@ impl Interpreter {
     fn exec_compound_assign(&mut self, name: &str, op: CompoundOp, expr: &Expr) -> Result<FlowSignal, String> {
         // Fast path: atomic int += int (lock-free)
         if op == CompoundOp::Add {
-            let is_atomic = matches!(self.env.get(name), Some(MaybeError::Ok(Value::Atomic(_))));
+            let is_atomic = self.env.get(name).map_or(false, |v| matches!(v, MaybeError::Ok(v) if v.is_atomic()));
             if is_atomic {
                 let rhs = self.eval_expr(expr)?;
-                if let (Some(MaybeError::Ok(Value::Atomic(a))), Value::Int(b)) = (self.env.get(name), &rhs) {
-                    let _ = a.fetch_add(*b);
-                    return Ok(FlowSignal::None);
+                if let (Some(MaybeError::Ok(current)), Some(b)) = (self.env.get(name), rhs.as_int()) {
+                    if let Some(a) = current.as_atomic() {
+                        let _ = a.fetch_add(b);
+                        return Ok(FlowSignal::None);
+                    }
                 }
             }
         }
@@ -390,14 +390,13 @@ impl Interpreter {
         if op == CompoundOp::Add {
             let rhs = self.eval_expr(expr)?;
             if let Some(MaybeError::Ok(current)) = self.env.get(name) {
-                match (current, &rhs) {
-                    (Value::Int(a), Value::Int(b)) => {
-                        self.env.set(name, MaybeError::Ok(Value::Int(a + b)))?;
+                match (current.kind(), rhs.kind()) {
+                    (VK::Int(a), VK::Int(b)) => {
+                        self.env.set(name, MaybeError::Ok(Value::int(a + b)))?;
                         return Ok(FlowSignal::None);
                     }
-                    (Value::String(a), Value::String(b)) => {
-                        let s: Rc<str> = Rc::from(format!("{a}{b}"));
-                        self.env.set(name, MaybeError::Ok(Value::String(s)))?;
+                    (VK::String(a), VK::String(b)) => {
+                        self.env.set(name, MaybeError::Ok(Value::string_from(&format!("{a}{b}"))))?;
                         return Ok(FlowSignal::None);
                     }
                     _ => {}
@@ -458,8 +457,8 @@ impl Interpreter {
         }
 
         let iterable = self.eval_expr(iter)?;
-        match &iterable {
-            Value::List(rc) => {
+        match iterable.kind() {
+            VK::List(rc) => {
                 let len = rc.borrow().len();
                 for idx in 0..len {
                     let item = rc.borrow()[idx].clone();
@@ -471,10 +470,10 @@ impl Interpreter {
                     }
                 }
             }
-            Value::String(s) => {
+            VK::String(s) => {
                 let chars: Vec<char> = s.chars().collect();
                 for c in chars {
-                    self.env.set(var, MaybeError::Ok(Value::String(Rc::from(c.to_string()))))?;
+                    self.env.set(var, MaybeError::Ok(Value::string_from(&c.to_string())))?;
                     match self.exec_loop_body(body)? {
                         FlowSignal::Break => break,
                         FlowSignal::Return(v) => return Ok(FlowSignal::Return(v)),
@@ -554,7 +553,7 @@ impl Interpreter {
         match self.env.get(name) {
             Some(MaybeError::Ok(val)) => {
                 // Transparent atomic load for operations
-                if let Value::Atomic(a) = val {
+                if let Some(a) = val.as_atomic() {
                     Ok(a.load())
                 } else {
                     Ok(val.clone())
@@ -585,9 +584,9 @@ impl Interpreter {
     /// Returns an error if the expression cannot be evaluated.
     pub fn eval_expr(&mut self, expr: &Expr) -> Result<Value, String> {
         match &expr.kind {
-            ExprKind::Int(n) => Ok(Value::Int(*n)),
-            ExprKind::Float(n) => Ok(Value::Float(*n)),
-            ExprKind::Bool(b) => Ok(Value::Bool(*b)),
+            ExprKind::Int(n) => Ok(Value::int(*n)),
+            ExprKind::Float(n) => Ok(Value::float(*n)),
+            ExprKind::Bool(b) => Ok(Value::bool(*b)),
             ExprKind::String(parts) => self.eval_string_parts(parts),
             ExprKind::List(elements) => self.eval_list(elements),
             ExprKind::Object(fields) => self.eval_object(fields),
@@ -607,7 +606,7 @@ impl Interpreter {
             ExprKind::OptionalCheck(name) => self.eval_optional_check(name),
             ExprKind::Atomic(inner) => {
                 let val = self.eval_expr(inner)?;
-                Ok(Value::Atomic(crate::interpreter::value::AtomicValue::new(&val)))
+                Ok(Value::atomic(crate::interpreter::value::AtomicValue::new(&val)))
             }
             ExprKind::PostIncDec { name, increment } => {
                 self.eval_post_inc_dec(name, *increment)
@@ -640,7 +639,7 @@ impl Interpreter {
                 format!("{}{}", home, &result[1..])
             };
         }
-        Ok(Value::String(Rc::from(result)))
+        Ok(Value::string_from(&result))
     }
 
     fn eval_list(&mut self, elements: &[Expr]) -> Result<Value, String> {
@@ -664,9 +663,9 @@ impl Interpreter {
         // Short-circuit for logical operators
         if op == BinOp::And {
             let l = self.eval_expr(left)?;
-            if !l.is_truthy() { return Ok(Value::Bool(false)); }
+            if !l.is_truthy() { return Ok(Value::bool(false)); }
             let r = self.eval_expr(right)?;
-            return Ok(Value::Bool(r.is_truthy()));
+            return Ok(Value::bool(r.is_truthy()));
         }
         if op == BinOp::Or {
             let l = self.eval_expr(left)?;
@@ -687,14 +686,14 @@ impl Interpreter {
     fn eval_unary_op(&mut self, op: UnaryOp, expr: &Expr) -> Result<Value, String> {
         let val = self.eval_expr(expr)?;
         match op {
-            UnaryOp::Neg => match val {
-                Value::Int(n) => Ok(Value::Int(-n)),
-                Value::Float(n) => Ok(Value::Float(-n)),
+            UnaryOp::Neg => match val.kind() {
+                VK::Int(n) => Ok(Value::int(-n)),
+                VK::Float(n) => Ok(Value::float(-n)),
                 _ => Err(format!("Cannot negate {}", val.type_name())),
             },
-            UnaryOp::Not => Ok(Value::Bool(!val.is_truthy())),
-            UnaryOp::BitNot => match val {
-                Value::Int(n) => Ok(Value::Int(!n)),
+            UnaryOp::Not => Ok(Value::bool(!val.is_truthy())),
+            UnaryOp::BitNot => match val.kind() {
+                VK::Int(n) => Ok(Value::int(!n)),
                 _ => Err(format!("Cannot bitwise NOT {}", val.type_name())),
             },
         }
@@ -717,17 +716,17 @@ impl Interpreter {
 
         // Get the object without cloning
         let Some(MaybeError::Ok(obj)) = self.env.get(obj_name) else { return None; };
-        let Value::Object(rc) = obj else { return None; };
+        let rc = obj.as_object_ref()?;
 
         let map = rc.borrow();
         let field_val = map.fields.get(field)?;
 
         // Now compare with the right side without cloning
-        let eq = match (&right.kind, field_val) {
-            (ExprKind::String(parts), Value::String(s)) => {
+        let eq = match (&right.kind, field_val.kind()) {
+            (ExprKind::String(parts), VK::String(s)) => {
                 if parts.len() == 1 {
                     if let StringPart::Literal(lit) = &parts[0] {
-                        &**s == lit
+                        s == lit
                     } else {
                         return None;
                     }
@@ -735,13 +734,13 @@ impl Interpreter {
                     return None;
                 }
             }
-            (ExprKind::Int(n), Value::Int(v)) => *n == *v,
-            (ExprKind::Bool(b), Value::Bool(v)) => *b == *v,
+            (ExprKind::Int(n), VK::Int(v)) => *n == v,
+            (ExprKind::Bool(b), VK::Bool(v)) => *b == v,
             _ => return None,
         };
 
         let result = if op == BinOp::Eq { eq } else { !eq };
-        Some(Value::Bool(result))
+        Some(Value::bool(result))
     }
 
     fn eval_call(&mut self, name: &str, resolution: Resolution, args: &[Expr]) -> Result<Value, String> {
@@ -755,20 +754,20 @@ impl Interpreter {
     fn eval_index(&mut self, expr: &Expr, index: &Expr) -> Result<Value, String> {
         let val = self.eval_expr(expr)?;
         let idx = self.eval_expr(index)?;
-        match (&val, &idx) {
-            (Value::List(list), Value::Int(i)) => {
+        match (val.kind(), idx.kind()) {
+            (VK::List(list), VK::Int(i)) => {
                 let list = list.borrow();
-                let idx = usize::try_from(*i).map_err(|_| format!("Negative index {i}"))?;
+                let idx = usize::try_from(i).map_err(|_| format!("Negative index {i}"))?;
                 list.get(idx).cloned().ok_or_else(|| format!("Index {idx} out of bounds (len {})", list.len()))
             }
-            (Value::String(s), Value::Int(i)) => {
-                let idx = usize::try_from(*i).map_err(|_| format!("Negative index {i}"))?;
+            (VK::String(s), VK::Int(i)) => {
+                let idx = usize::try_from(i).map_err(|_| format!("Negative index {i}"))?;
                 s.chars().nth(idx)
-                    .map(|c| Value::String(Rc::from(c.to_string())))
+                    .map(|c| Value::string_from(&c.to_string()))
                     .ok_or_else(|| format!("Index {idx} out of bounds"))
             }
-            (Value::Object(rc), Value::String(key)) => {
-                rc.borrow().fields.get(&**key).cloned().ok_or_else(|| format!("Field '{key}' not found"))
+            (VK::Object(rc), VK::String(key)) => {
+                rc.borrow().fields.get(key).cloned().ok_or_else(|| format!("Field '{key}' not found"))
             }
             _ => Err(format!("Cannot index {} with {}", val.type_name(), idx.type_name())),
         }
@@ -776,15 +775,15 @@ impl Interpreter {
 
     fn eval_field_access(&mut self, expr: &Expr, field: &str) -> Result<Value, String> {
         let val = self.eval_expr(expr)?;
-        match &val {
-            Value::Object(rc) => {
+        match val.kind() {
+            VK::Object(rc) => {
                 rc.borrow().fields.get(field).cloned().ok_or_else(|| format!("Field '{field}' not found"))
             }
-            Value::CommandResult { status, out, err } => {
+            VK::CommandResult(data) => {
                 match field {
-                    "status" => Ok(Value::Int(i64::from(*status))),
-                    "out" => Ok(Value::String(Rc::from(out.as_str()))),
-                    "err" => Ok(Value::String(Rc::from(err.as_str()))),
+                    "status" => Ok(Value::int(i64::from(data.status))),
+                    "out" => Ok(Value::string_from(&data.out)),
+                    "err" => Ok(Value::string_from(&data.err)),
                     _ => Err(format!("CommandResult has no field '{field}'")),
                 }
             }
@@ -795,9 +794,9 @@ impl Interpreter {
     fn eval_range(&mut self, start: &Expr, end: &Expr) -> Result<Value, String> {
         let s = self.eval_expr(start)?;
         let e = self.eval_expr(end)?;
-        match (&s, &e) {
-            (Value::Int(a), Value::Int(b)) => {
-                let items: Vec<Value> = (*a..=*b).map(Value::Int).collect();
+        match (s.kind(), e.kind()) {
+            (VK::Int(a), VK::Int(b)) => {
+                let items: Vec<Value> = (a..=b).map(Value::int).collect();
                 Ok(new_list(items))
             }
             _ => Err(format!("Range requires int..int, got {}..{}", s.type_name(), e.type_name())),
@@ -843,17 +842,17 @@ impl Interpreter {
             Resolution::OwnFirst => 1,
             Resolution::SystemOnly => 2,
         };
-        Ok(Value::Lambda {
+        Ok(Value::lambda(super::value::LambdaData {
             name: name.to_owned(),
             resolution: res_code,
             bound_args: eval_args,
-        })
+        }))
     }
 
     fn eval_error_check(&self, name: &str) -> Result<Value, String> {
         match self.env.get(name) {
-            Some(MaybeError::Ok(_)) => Ok(Value::Bool(true)),
-            Some(MaybeError::Err(_)) => Ok(Value::Bool(false)),
+            Some(MaybeError::Ok(_)) => Ok(Value::bool(true)),
+            Some(MaybeError::Err(_)) => Ok(Value::bool(false)),
             None => Err(format!("Undefined variable: '{name}'")),
         }
     }
@@ -861,9 +860,9 @@ impl Interpreter {
     fn eval_optional_check(&self, name: &str) -> Result<Value, String> {
         // <param> evaluates to true if the optional param was provided (not void), false otherwise.
         match self.env.get(name) {
-            Some(MaybeError::Ok(Value::Void)) => Ok(Value::Bool(false)),
-            Some(MaybeError::Ok(_)) => Ok(Value::Bool(true)),
-            Some(MaybeError::Err(_)) => Ok(Value::Bool(true)), // provided but error
+            Some(MaybeError::Ok(v)) if v.is_void() => Ok(Value::bool(false)),
+            Some(MaybeError::Ok(_)) => Ok(Value::bool(true)),
+            Some(MaybeError::Err(_)) => Ok(Value::bool(true)), // provided but error
             None => Err(format!("'<{name}>' used outside of a function that declares '{name}' as optional")),
         }
     }
@@ -871,7 +870,7 @@ impl Interpreter {
     fn eval_error_field(&self, name: &str, field: &str) -> Result<Value, String> {
         match self.env.get(name) {
             Some(MaybeError::Err(err)) => match field {
-                "error" | "message" => Ok(Value::String(Rc::from(err.message.as_str()))),
+                "error" | "message" => Ok(Value::string_from(&err.message)),
                 _ => Err(format!("Error has no field '{field}', use 'error' or 'message'")),
             },
             Some(MaybeError::Ok(_)) => Err(format!("'{name}' is not in error state")),
@@ -885,22 +884,22 @@ impl Interpreter {
         match dollar {
             DollarRef::Whole => Ok(send_val.clone()),
             DollarRef::Index(i) => {
-                if let Value::List(list) = send_val {
+                if let Some(list) = send_val.as_list_ref() {
                     list.borrow().get(*i).cloned().ok_or_else(|| format!("${i} out of bounds"))
                 } else {
                     Err(format!("${i} requires a list, got {}", send_val.type_name()))
                 }
             }
             DollarRef::Field(field) => {
-                match send_val {
-                    Value::Object(rc) => {
+                match send_val.kind() {
+                    VK::Object(rc) => {
                         rc.borrow().fields.get(field).cloned().ok_or_else(|| format!("${field} not found"))
                     }
-                    Value::CommandResult { status, out, err } => {
+                    VK::CommandResult(data) => {
                         match field.as_str() {
-                            "status" => Ok(Value::Int(i64::from(*status))),
-                            "out" => Ok(Value::String(Rc::from(out.as_str()))),
-                            "err" => Ok(Value::String(Rc::from(err.as_str()))),
+                            "status" => Ok(Value::int(i64::from(data.status))),
+                            "out" => Ok(Value::string_from(&data.out)),
+                            "err" => Ok(Value::string_from(&data.err)),
                             _ => Err(format!("${field} not found on CommandResult")),
                         }
                     }
@@ -910,13 +909,13 @@ impl Interpreter {
         }
     }
 
-    /// Call a builtin by name. Temporarily takes the registry out to avoid borrow conflicts.
+    /// Call a builtin by name. Uses validate_and_get_handler to avoid borrow conflicts.
     fn call_builtin(&mut self, name: &str, args: &[Value]) -> Option<Result<Value, String>> {
-        // Take registry out to avoid &self + &mut self conflict
-        let reg = std::mem::replace(&mut self.registry, crate::builtins::registry::BuiltinRegistry::new());
-        let result = reg.call(name, args, self);
-        self.registry = reg;
-        result
+        let handler = match self.registry.validate_and_get_handler(name, args)? {
+            Ok(h) => h,
+            Err(e) => return Some(Err(e)),
+        };
+        Some(handler(args, self))
     }
 
     /// Call a lambda value with given arguments. Used by builtins like map/filter.
@@ -925,20 +924,19 @@ impl Interpreter {
     ///
     /// Returns an error if the lambda call fails.
     pub fn call_lambda(&mut self, lambda: &Value, args: Vec<Value>) -> Result<Value, String> {
-        match lambda {
-            Value::Lambda { name, resolution, bound_args } => {
-                if !bound_args.is_empty() && !args.is_empty() {
-                    return Err(format!("Lambda @{name} already has bound args"));
-                }
-                let call_args = if bound_args.is_empty() { args } else { bound_args.clone() };
-                let res = match resolution {
-                    1 => Resolution::OwnFirst,
-                    2 => Resolution::SystemOnly,
-                    _ => Resolution::Normal,
-                };
-                self.call_resolved(name, res, call_args)
+        if let Some(data) = lambda.as_lambda() {
+            if !data.bound_args.is_empty() && !args.is_empty() {
+                return Err(format!("Lambda @{} already has bound args", data.name));
             }
-            _ => Err(format!("Expected lambda, got {}", lambda.type_name())),
+            let call_args = if data.bound_args.is_empty() { args } else { data.bound_args.clone() };
+            let res = match data.resolution {
+                1 => Resolution::OwnFirst,
+                2 => Resolution::SystemOnly,
+                _ => Resolution::Normal,
+            };
+            self.call_resolved(&data.name, res, call_args)
+        } else {
+            Err(format!("Expected lambda, got {}", lambda.type_name()))
         }
     }
 
@@ -961,17 +959,20 @@ impl Interpreter {
         let lower = lower_cow.as_ref();
 
         // Check if name is a variable holding a lambda
-        if let Some(MaybeError::Ok(Value::Lambda { name: fn_name, resolution: res_code, bound_args })) = self.env.get(lower).cloned() {
-            if !bound_args.is_empty() && !args.is_empty() {
-                return Err(format!("Lambda '{name}' already has bound args, cannot pass additional args"));
+        if let Some(MaybeError::Ok(val)) = self.env.get(lower) {
+            if let Some(data) = val.as_lambda() {
+                let data = data.clone();
+                if !data.bound_args.is_empty() && !args.is_empty() {
+                    return Err(format!("Lambda '{name}' already has bound args, cannot pass additional args"));
+                }
+                let call_args = if data.bound_args.is_empty() { args } else { data.bound_args };
+                let lambda_resolution = match data.resolution {
+                    1 => Resolution::OwnFirst,
+                    2 => Resolution::SystemOnly,
+                    _ => Resolution::Normal,
+                };
+                return self.call_resolved(&data.name, lambda_resolution, call_args);
             }
-            let call_args = if bound_args.is_empty() { args } else { bound_args };
-            let lambda_resolution = match res_code {
-                1 => Resolution::OwnFirst,
-                2 => Resolution::SystemOnly,
-                _ => Resolution::Normal,
-            };
-            return self.call_resolved(&fn_name, lambda_resolution, call_args);
         }
 
         match resolution {
@@ -1062,8 +1063,8 @@ impl Interpreter {
         }
         // Bind optional params: check annotation > inferred type (skip if dyn)
         for (i, (opt_param, ann, is_dyn)) in func.optional_params.iter().enumerate() {
-            let val = args.get(required_count + i).cloned().unwrap_or(Value::Void);
-            if !is_dyn && !matches!(val, Value::Void) {
+            let val = args.get(required_count + i).cloned().unwrap_or(Value::void());
+            if !is_dyn && !val.is_void() {
                 if let Some(ann) = ann {
                     if let Err(e) = check_type_annotation(ann, &val, opt_param) {
                         self.env.pop_scope();
@@ -1087,7 +1088,7 @@ impl Interpreter {
             self.env.set_local(opt_param, MaybeError::Ok(val));
         }
 
-        let mut return_val = Value::Void;
+        let mut return_val = Value::void();
         for stmt in &func.body {
             match self.exec_stmt(stmt) {
                 Ok(FlowSignal::Return(Some(val))) => {
@@ -1107,7 +1108,7 @@ impl Interpreter {
 
         // Enforce declared return type annotation using the already-cloned func snapshot
         if let Some(ann) = &func.declared_return_type
-            && !matches!(return_val, Value::Void)
+            && !return_val.is_void()
             && let Err(e) = check_type_annotation(ann, &return_val, &format!("return value of '{name}'")) {
                 return Some(Err(e));
             }
@@ -1154,7 +1155,7 @@ impl Interpreter {
                         continue;
                     }
                     if let Some(val) = args.get(required_count + i) {
-                        if !matches!(val, Value::Void) {
+                        if !val.is_void() {
                             live_func.inferred_types.insert(
                                 param.clone(),
                                 TypeAnnotation::Simple(val.type_name().to_string()),
@@ -1176,14 +1177,14 @@ impl Interpreter {
         let step = if args.len() == 3 {
             self.eval_expr(&args[2])?
         } else {
-            Value::Int(1)
+            Value::int(1)
         };
-        match (&start, &end, &step) {
-            (Value::Int(s), Value::Int(e), Value::Int(st)) => {
-                if *st == 0 {
+        match (start.kind(), end.kind(), step.kind()) {
+            (VK::Int(s), VK::Int(e), VK::Int(st)) => {
+                if st == 0 {
                     return Err("range() step cannot be 0".to_string());
                 }
-                Ok(Some((*s, *e, *st)))
+                Ok(Some((s, e, st)))
             }
             _ => Ok(None),
         }
@@ -1201,7 +1202,7 @@ impl Interpreter {
         let mut i = start;
         if step > 0 {
             while i <= end {
-                self.env.set(var, MaybeError::Ok(Value::Int(i)))?;
+                self.env.set(var, MaybeError::Ok(Value::int(i)))?;
                 match self.exec_loop_body(body)? {
                     FlowSignal::Break => break,
                     FlowSignal::Return(v) => return Ok(FlowSignal::Return(v)),
@@ -1211,7 +1212,7 @@ impl Interpreter {
             }
         } else {
             while i >= end {
-                self.env.set(var, MaybeError::Ok(Value::Int(i)))?;
+                self.env.set(var, MaybeError::Ok(Value::int(i)))?;
                 match self.exec_loop_body(body)? {
                     FlowSignal::Break => break,
                     FlowSignal::Return(v) => return Ok(FlowSignal::Return(v)),
@@ -1227,49 +1228,49 @@ impl Interpreter {
         // Type-strict comparisons
         match op {
             BinOp::Eq => {
-                if std::mem::discriminant(left) != std::mem::discriminant(right) {
+                if left.type_name() != right.type_name() {
                     return Err(format!("Type mismatch: cannot compare {} with {}", left.type_name(), right.type_name()));
                 }
-                return Ok(Value::Bool(values_equal(left, right)));
+                return Ok(Value::bool(values_equal(left, right)));
             }
             BinOp::NotEq => {
-                if std::mem::discriminant(left) != std::mem::discriminant(right) {
+                if left.type_name() != right.type_name() {
                     return Err(format!("Type mismatch: cannot compare {} with {}", left.type_name(), right.type_name()));
                 }
-                return Ok(Value::Bool(!values_equal(left, right)));
+                return Ok(Value::bool(!values_equal(left, right)));
             }
             _ => {}
         }
 
-        match (left, right) {
+        match (left.kind(), right.kind()) {
             // Int arithmetic
-            (Value::Int(a), Value::Int(b)) => Self::apply_int_op(*a, op, *b),
+            (VK::Int(a), VK::Int(b)) => Self::apply_int_op(a, op, b),
 
             // Float arithmetic
-            (Value::Float(a), Value::Float(b)) => apply_float_op(*a, op, *b),
+            (VK::Float(a), VK::Float(b)) => apply_float_op(a, op, b),
 
             // Int + Float promotion
-            (Value::Int(a), Value::Float(b)) => {
-                let a_f64 = *a as f64;
-                apply_float_op(a_f64, op, *b)
+            (VK::Int(a), VK::Float(b)) => {
+                let a_f64 = a as f64;
+                apply_float_op(a_f64, op, b)
             }
-            (Value::Float(a), Value::Int(b)) => {
-                let b_f64 = *b as f64;
-                apply_float_op(*a, op, b_f64)
+            (VK::Float(a), VK::Int(b)) => {
+                let b_f64 = b as f64;
+                apply_float_op(a, op, b_f64)
             }
 
             // String concatenation
-            (Value::String(a), Value::String(b)) => match op {
-                BinOp::Add => Ok(Value::String(Rc::from(format!("{a}{b}")))),
-                BinOp::Lt => Ok(Value::Bool(a < b)),
-                BinOp::Gt => Ok(Value::Bool(a > b)),
-                BinOp::LtEq => Ok(Value::Bool(a <= b)),
-                BinOp::GtEq => Ok(Value::Bool(a >= b)),
+            (VK::String(a), VK::String(b)) => match op {
+                BinOp::Add => Ok(Value::string_from(&format!("{a}{b}"))),
+                BinOp::Lt => Ok(Value::bool(a < b)),
+                BinOp::Gt => Ok(Value::bool(a > b)),
+                BinOp::LtEq => Ok(Value::bool(a <= b)),
+                BinOp::GtEq => Ok(Value::bool(a >= b)),
                 _ => Err(format!("Unsupported operation: string {op:?} string")),
             },
 
             // List concatenation
-            (Value::List(a), Value::List(b)) => match op {
+            (VK::List(a), VK::List(b)) => match op {
                 BinOp::Add => {
                     let mut result = a.borrow().clone();
                     result.extend(b.borrow().iter().cloned());
@@ -1287,30 +1288,30 @@ impl Interpreter {
 
     fn apply_int_op(a: i64, op: BinOp, b: i64) -> Result<Value, String> {
         match op {
-            BinOp::Add => Ok(Value::Int(a + b)),
-            BinOp::Sub => Ok(Value::Int(a - b)),
-            BinOp::Mul => Ok(Value::Int(a * b)),
+            BinOp::Add => Ok(Value::int(a + b)),
+            BinOp::Sub => Ok(Value::int(a - b)),
+            BinOp::Mul => Ok(Value::int(a * b)),
             BinOp::Div => {
                 if b == 0 { return Err("Division by zero".to_string()); }
-                Ok(Value::Int(a / b))
+                Ok(Value::int(a / b))
             }
             BinOp::Mod => {
                 if b == 0 { return Err("Modulo by zero".to_string()); }
-                Ok(Value::Int(a % b))
+                Ok(Value::int(a % b))
             }
             BinOp::Pow => {
                 let exp = u32::try_from(b).map_err(|_| format!("Exponent {b} out of range for integer pow"))?;
-                Ok(Value::Int(a.pow(exp)))
+                Ok(Value::int(a.pow(exp)))
             }
-            BinOp::Lt => Ok(Value::Bool(a < b)),
-            BinOp::Gt => Ok(Value::Bool(a > b)),
-            BinOp::LtEq => Ok(Value::Bool(a <= b)),
-            BinOp::GtEq => Ok(Value::Bool(a >= b)),
-            BinOp::BitAnd => Ok(Value::Int(a & b)),
-            BinOp::BitOr => Ok(Value::Int(a | b)),
-            BinOp::BitXor => Ok(Value::Int(a ^ b)),
-            BinOp::Shl => Ok(Value::Int(a << b)),
-            BinOp::Shr => Ok(Value::Int(a >> b)),
+            BinOp::Lt => Ok(Value::bool(a < b)),
+            BinOp::Gt => Ok(Value::bool(a > b)),
+            BinOp::LtEq => Ok(Value::bool(a <= b)),
+            BinOp::GtEq => Ok(Value::bool(a >= b)),
+            BinOp::BitAnd => Ok(Value::int(a & b)),
+            BinOp::BitOr => Ok(Value::int(a | b)),
+            BinOp::BitXor => Ok(Value::int(a ^ b)),
+            BinOp::Shl => Ok(Value::int(a << b)),
+            BinOp::Shr => Ok(Value::int(a >> b)),
             _ => Err(format!("Unsupported operation: int {op:?} int")),
         }
     }
@@ -1335,16 +1336,16 @@ impl Interpreter {
 
 fn apply_float_op(a: f64, op: BinOp, b: f64) -> Result<Value, String> {
     match op {
-        BinOp::Add => Ok(Value::Float(a + b)),
-        BinOp::Sub => Ok(Value::Float(a - b)),
-        BinOp::Mul => Ok(Value::Float(a * b)),
-        BinOp::Div => Ok(Value::Float(a / b)),
-        BinOp::Mod => Ok(Value::Float(a % b)),
-        BinOp::Pow => Ok(Value::Float(a.powf(b))),
-        BinOp::Lt => Ok(Value::Bool(a < b)),
-        BinOp::Gt => Ok(Value::Bool(a > b)),
-        BinOp::LtEq => Ok(Value::Bool(a <= b)),
-        BinOp::GtEq => Ok(Value::Bool(a >= b)),
+        BinOp::Add => Ok(Value::float(a + b)),
+        BinOp::Sub => Ok(Value::float(a - b)),
+        BinOp::Mul => Ok(Value::float(a * b)),
+        BinOp::Div => Ok(Value::float(a / b)),
+        BinOp::Mod => Ok(Value::float(a % b)),
+        BinOp::Pow => Ok(Value::float(a.powf(b))),
+        BinOp::Lt => Ok(Value::bool(a < b)),
+        BinOp::Gt => Ok(Value::bool(a > b)),
+        BinOp::LtEq => Ok(Value::bool(a <= b)),
+        BinOp::GtEq => Ok(Value::bool(a >= b)),
         _ => Err(format!("Unsupported operation: float {op:?} float")),
     }
 }
@@ -1368,7 +1369,7 @@ fn check_type_annotation(ann: &TypeAnnotation, val: &Value, context: &str) -> Re
             }
         }
         TypeAnnotation::Object(fields) => {
-            let Value::Object(rc) = val else {
+            let Some(rc) = val.as_object_ref() else {
                 return Err(format!(
                     "Type error: '{context}' declared as object, got {}",
                     val.type_name()
@@ -1398,12 +1399,12 @@ fn check_type_annotation(ann: &TypeAnnotation, val: &Value, context: &str) -> Re
 }
 
 fn values_equal(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Int(x), Value::Int(y)) => x == y,
-        (Value::Float(x), Value::Float(y)) => (x - y).abs() < f64::EPSILON,
-        (Value::String(x), Value::String(y)) => x == y,
-        (Value::Bool(x), Value::Bool(y)) => x == y,
-        (Value::Void, Value::Void) => true,
+    match (a.kind(), b.kind()) {
+        (VK::Int(x), VK::Int(y)) => x == y,
+        (VK::Float(x), VK::Float(y)) => (x - y).abs() < f64::EPSILON,
+        (VK::String(x), VK::String(y)) => x == y,
+        (VK::Bool(x), VK::Bool(y)) => x == y,
+        (VK::Void, VK::Void) => true,
         _ => false,
     }
 }

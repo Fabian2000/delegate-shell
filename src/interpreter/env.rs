@@ -96,9 +96,11 @@ impl Environment {
         for scope in self.scopes.iter_mut().rev() {
             if let Some(slot) = scope.get_mut(key.as_ref()) {
                 // If existing is Atomic, store into it instead of replacing
-                if let (MaybeError::Ok(Value::Atomic(a)), MaybeError::Ok(new_val)) = (&slot, &value) {
-                    a.store(new_val);
-                    return Ok(());
+                if let (MaybeError::Ok(existing), MaybeError::Ok(new_val)) = (&slot, &value) {
+                    if let Some(a) = existing.as_atomic() {
+                        a.store(new_val);
+                        return Ok(());
+                    }
                 }
                 // Type check: existing Ok value must match new Ok value's type
                 if let (MaybeError::Ok(existing), MaybeError::Ok(new_val)) = (&slot, &value) {
@@ -110,8 +112,8 @@ impl Environment {
                         ));
                     }
                     // Structural check for objects: same fields with same types
-                    if let (Value::Object(old_rc), Value::Object(new_rc)) = (existing, new_val) {
-                        check_object_structure(name, &*old_rc.borrow(), &*new_rc.borrow())?;
+                    if let (Some(old_ref), Some(new_ref)) = (existing.as_object_ref(), new_val.as_object_ref()) {
+                        check_object_structure(name, &*old_ref.borrow(), &*new_ref.borrow())?;
                     }
                 }
                 *slot = value;
@@ -216,7 +218,7 @@ fn check_object_structure(
     for (key, old_val) in &old.fields {
         let new_val = &new.fields[key];
         // Skip type check for dyn fields when the new value is Void
-        if new.dyn_fields.contains(key) && matches!(new_val, Value::Void) {
+        if new.dyn_fields.contains(key) && new_val.is_void() {
             continue;
         }
         let old_type = old_val.type_name();
@@ -227,8 +229,8 @@ fn check_object_structure(
             ));
         }
         // Recursive check for nested objects
-        if let (Value::Object(old_rc), Value::Object(new_rc)) = (old_val, new_val) {
-            check_object_structure(&format!("{var_name}.{key}"), &*old_rc.borrow(), &*new_rc.borrow())?;
+        if let (Some(old_ref), Some(new_ref)) = (old_val.as_object_ref(), new_val.as_object_ref()) {
+            check_object_structure(&format!("{var_name}.{key}"), &*old_ref.borrow(), &*new_ref.borrow())?;
         }
     }
     Ok(())

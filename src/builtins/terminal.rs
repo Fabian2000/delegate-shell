@@ -38,13 +38,13 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     reg.add("reset_style", &[], Type::Void, |_args| {
         print!("{RESET}");
         let _ = std::io::stdout().flush();
-        Ok(Value::Void)
+        Ok(Value::void())
     })?;
 
     reg.add("clear", &[], Type::Void, |_args| {
         print!("{ESC}2J{ESC}H");
         let _ = std::io::stdout().flush();
-        Ok(Value::Void)
+        Ok(Value::void())
     })?;
 
     reg.add("cursor_pos", &[Param::Required(Type::Int), Param::Required(Type::Int)], Type::Void, builtin_cursor_pos)?;
@@ -54,19 +54,19 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
 }
 
 fn builtin_set_color(args: &[Value]) -> Result<Value, String> {
-    let Value::String(name) = &args[0] else { unreachable!() };
+    let Some(name) = args[0].as_str_ref() else { unreachable!() };
     let code = color_code(name, false)?;
     print!("{ESC}{code}m");
     let _ = std::io::stdout().flush();
-    Ok(Value::Void)
+    Ok(Value::void())
 }
 
 fn builtin_set_bg(args: &[Value]) -> Result<Value, String> {
-    let Value::String(name) = &args[0] else { unreachable!() };
+    let Some(name) = args[0].as_str_ref() else { unreachable!() };
     let code = color_code(name, true)?;
     print!("{ESC}{code}m");
     let _ = std::io::stdout().flush();
-    Ok(Value::Void)
+    Ok(Value::void())
 }
 
 fn builtin_set_bold(args: &[Value]) -> Result<Value, String> {
@@ -76,7 +76,7 @@ fn builtin_set_bold(args: &[Value]) -> Result<Value, String> {
         print!("{ESC}22m");
     }
     let _ = std::io::stdout().flush();
-    Ok(Value::Void)
+    Ok(Value::void())
 }
 
 fn builtin_set_dim(args: &[Value]) -> Result<Value, String> {
@@ -86,7 +86,7 @@ fn builtin_set_dim(args: &[Value]) -> Result<Value, String> {
         print!("{ESC}22m");
     }
     let _ = std::io::stdout().flush();
-    Ok(Value::Void)
+    Ok(Value::void())
 }
 
 fn builtin_set_underline(args: &[Value]) -> Result<Value, String> {
@@ -96,15 +96,15 @@ fn builtin_set_underline(args: &[Value]) -> Result<Value, String> {
         print!("{ESC}24m");
     }
     let _ = std::io::stdout().flush();
-    Ok(Value::Void)
+    Ok(Value::void())
 }
 
 fn builtin_cursor_pos(args: &[Value]) -> Result<Value, String> {
-    let Value::Int(row) = &args[0] else { unreachable!() };
-    let Value::Int(col) = &args[1] else { unreachable!() };
+    let Some(row) = args[0].as_int() else { unreachable!() };
+    let Some(col) = args[1].as_int() else { unreachable!() };
     print!("{ESC}{row};{col}H");
     let _ = std::io::stdout().flush();
-    Ok(Value::Void)
+    Ok(Value::void())
 }
 
 fn builtin_term_size(_args: &[Value]) -> Result<Value, String> {
@@ -124,15 +124,15 @@ fn builtin_term_size(_args: &[Value]) -> Result<Value, String> {
         if ret == 0 {
             let ws = unsafe { ws.assume_init() };
             let mut map = indexmap::IndexMap::new();
-            map.insert("width".to_string(), Value::Int(i64::from(ws.cols)));
-            map.insert("height".to_string(), Value::Int(i64::from(ws.rows)));
+            map.insert("width".to_string(), Value::int(i64::from(ws.cols)));
+            map.insert("height".to_string(), Value::int(i64::from(ws.rows)));
             return Ok(crate::interpreter::value::new_object(map));
         }
     }
     // Fallback
     let mut map = indexmap::IndexMap::new();
-    map.insert("width".to_string(), Value::Int(80));
-    map.insert("height".to_string(), Value::Int(24));
+    map.insert("width".to_string(), Value::int(80));
+    map.insert("height".to_string(), Value::int(24));
     Ok(crate::interpreter::value::new_object(map))
 }
 

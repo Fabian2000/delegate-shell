@@ -1,5 +1,5 @@
 use std::rc::Rc;
-use crate::interpreter::value::{Value, new_list, new_object};
+use crate::interpreter::value::{Value, ValueKind as VK, new_list, new_object};
 use crate::interpreter::Interpreter;
 use crate::parser::ast::Resolution;
 use super::bytecode::{Op, Chunk};
@@ -29,9 +29,13 @@ pub struct VM {
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<CallFrame>,
     pub(crate) chunks: Vec<Chunk>,
-    globals: std::collections::HashMap<String, Value>,
-    error_vars: std::collections::HashMap<String, String>,
-    ok_vars: std::collections::HashSet<String>,
+    globals: Vec<Value>,
+    /// Reverse mapping: global slot index → variable name (for error messages & lambda lookup)
+    global_names: Vec<Rc<str>>,
+    /// Name → global slot index (for runtime name-based lookup, e.g. lambda in globals)
+    global_name_to_slot: std::collections::HashMap<String, u16>,
+    error_vars: std::collections::HashMap<u16, String>,
+    ok_vars: std::collections::HashSet<u16>,
     fn_table: std::collections::HashMap<String, usize>,
     send_stack: Vec<Option<Value>>,
     try_stack: Vec<TryPoint>,
@@ -45,7 +49,9 @@ impl VM {
             stack: Vec::with_capacity(4096),
             frames: Vec::with_capacity(256),
             chunks: Vec::new(),
-            globals: std::collections::HashMap::new(),
+            globals: Vec::new(),
+            global_names: Vec::new(),
+            global_name_to_slot: std::collections::HashMap::new(),
             error_vars: std::collections::HashMap::new(),
             ok_vars: std::collections::HashSet::new(),
             fn_table: std::collections::HashMap::new(),
@@ -58,6 +64,13 @@ impl VM {
 
     pub fn execute(&mut self, chunks: Vec<Chunk>, interp: &mut Interpreter) -> Result<(), String> {
         let chunk_count = chunks.len();
+        // Initialize global variable slots from the top-level chunk's metadata
+        if !chunks.is_empty() {
+            let num_globals = chunks[0].global_names.len();
+            self.globals.resize(num_globals, Value::void());
+            self.global_names = chunks[0].global_names.clone();
+            self.global_name_to_slot = chunks[0].global_slots.clone();
+        }
         self.chunks = chunks;
         if interp.is_jit_mode() {
             self.jit = Some(super::jit::JitManager::new(chunk_count));
@@ -71,7 +84,7 @@ impl VM {
         let target_depth = self.frames.len() - 1;
         self.run(interp)?;
         // The return value should be on the stack
-        Ok(self.stack.pop().unwrap_or(Value::Void))
+        Ok(self.stack.pop().unwrap_or(Value::void()))
     }
 
     #[inline(never)]
@@ -129,7 +142,7 @@ impl VM {
                 self.frames.pop();
                 frame_idx -= 1;
                 self.stack.truncate(old_base);
-                self.stack.push(Value::Void);
+                self.stack.push(Value::void());
                 continue;
             }
 
@@ -143,7 +156,7 @@ impl VM {
                 // ============================================================
                 Op::LoadInt => {
                     let val = read_i64!();
-                    self.stack.push(Value::Int(val));
+                    self.stack.push(Value::int(val));
                 }
                 Op::GetLocal => {
                     let slot = read_u16!() as usize;
@@ -155,75 +168,75 @@ impl VM {
                     let val = self.stack.pop().ok_or("VM: stack underflow")?;
                     let idx = base!() + slot;
                     if idx >= self.stack.len() {
-                        self.stack.resize(idx + 1, Value::Void);
+                        self.stack.resize(idx + 1, Value::void());
                     }
                     self.stack[idx] = val;
                 }
                 Op::AddInt => {
                     let b = self.pop_int()?;
                     let a = self.pop_int()?;
-                    self.stack.push(Value::Int(a + b));
+                    self.stack.push(Value::int(a + b));
                 }
                 Op::SubInt => {
                     let b = self.pop_int()?;
                     let a = self.pop_int()?;
-                    self.stack.push(Value::Int(a - b));
+                    self.stack.push(Value::int(a - b));
                 }
                 Op::LteInt => {
                     let b = self.pop_int()?;
                     let a = self.pop_int()?;
-                    self.stack.push(Value::Bool(a <= b));
+                    self.stack.push(Value::bool(a <= b));
                 }
                 Op::LtInt => {
                     let b = self.pop_int()?;
                     let a = self.pop_int()?;
-                    self.stack.push(Value::Bool(a < b));
+                    self.stack.push(Value::bool(a < b));
                 }
                 Op::GtInt => {
                     let b = self.pop_int()?;
                     let a = self.pop_int()?;
-                    self.stack.push(Value::Bool(a > b));
+                    self.stack.push(Value::bool(a > b));
                 }
                 Op::GteInt => {
                     let b = self.pop_int()?;
                     let a = self.pop_int()?;
-                    self.stack.push(Value::Bool(a >= b));
+                    self.stack.push(Value::bool(a >= b));
                 }
                 Op::EqInt => {
                     let b = self.pop_int()?;
                     let a = self.pop_int()?;
-                    self.stack.push(Value::Bool(a == b));
+                    self.stack.push(Value::bool(a == b));
                 }
                 Op::NeqInt => {
                     let b = self.pop_int()?;
                     let a = self.pop_int()?;
-                    self.stack.push(Value::Bool(a != b));
+                    self.stack.push(Value::bool(a != b));
                 }
                 Op::MulInt => {
                     let b = self.pop_int()?;
                     let a = self.pop_int()?;
-                    self.stack.push(Value::Int(a * b));
+                    self.stack.push(Value::int(a * b));
                 }
                 Op::DivInt => {
                     let b = self.pop_int()?;
                     if b == 0 { return Err("Division by zero".to_string()); }
                     let a = self.pop_int()?;
-                    self.stack.push(Value::Int(a / b));
+                    self.stack.push(Value::int(a / b));
                 }
                 Op::ModInt => {
                     let b = self.pop_int()?;
                     if b == 0 { return Err("Modulo by zero".to_string()); }
                     let a = self.pop_int()?;
-                    self.stack.push(Value::Int(a % b));
+                    self.stack.push(Value::int(a % b));
                 }
                 Op::NegInt => {
                     let a = self.pop_int()?;
-                    self.stack.push(Value::Int(-a));
+                    self.stack.push(Value::int(-a));
                 }
                 Op::JumpIfFalse => {
                     let offset = read_i32!();
                     let val = self.stack.last().ok_or("VM: stack underflow")?;
-                    if !is_truthy(val) {
+                    if !val.is_truthy() {
                         let cur_ip = ip!();
                         self.frames[frame_idx].ip = (cur_ip as i32 + offset) as usize;
                     }
@@ -231,7 +244,7 @@ impl VM {
                 Op::JumpIfTrue => {
                     let offset = read_i32!();
                     let val = self.stack.last().ok_or("VM: stack underflow")?;
-                    if is_truthy(val) {
+                    if val.is_truthy() {
                         let cur_ip = ip!();
                         self.frames[frame_idx].ip = (cur_ip as i32 + offset) as usize;
                     }
@@ -254,15 +267,21 @@ impl VM {
                     // JIT: check if this function is hot and JIT'd
                     if let Some(ref mut jit) = self.jit {
                         if let Some(ptr) = jit.check_and_compile(target_chunk, &self.chunks) {
-                            // Single int arg → call native
-                            if argc == 1 {
-                                if let Some(Value::Int(arg)) = self.stack.last() {
-                                    let arg = *arg;
-                                    self.stack.pop();
-                                    let result = unsafe { jit.call_int_fn(ptr, arg) };
-                                    self.stack.push(Value::Int(result));
-                                    continue;
+                            if argc >= 1 && argc <= 8 {
+                                let mut raw_args = Vec::with_capacity(argc as usize);
+                                let start = self.stack.len() - argc as usize;
+                                for i in 0..argc as usize {
+                                    raw_args.push(self.stack[start + i].raw());
                                 }
+                                // Don't drop the values — the JIT now owns them
+                                // Actually we need to forget them since raw() doesn't consume
+                                for _ in 0..argc {
+                                    let v = self.stack.pop().unwrap();
+                                    std::mem::forget(v);
+                                }
+                                let result_raw = unsafe { jit.call_jit_fn(ptr, &raw_args) };
+                                self.stack.push(Value::from_raw(result_raw));
+                                continue;
                             }
                         }
                     }
@@ -294,7 +313,7 @@ impl VM {
                     }
                     frame_idx -= 1;
                     self.stack.truncate(old_base);
-                    self.stack.push(Value::Void);
+                    self.stack.push(Value::void());
                 }
 
                 // ============================================================
@@ -303,10 +322,10 @@ impl VM {
                 Op::Add => {
                     let len = self.stack.len();
                     if len >= 2 {
-                        if let (Value::Int(a), Value::Int(b)) = (&self.stack[len-2], &self.stack[len-1]) {
-                            let r = *a + *b;
+                        if let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
+                            let r = a + b;
                             self.stack.pop();
-                            if let Some(v) = self.stack.last_mut() { *v = Value::Int(r); }
+                            if let Some(v) = self.stack.last_mut() { *v = Value::int(r); }
                             continue;
                         }
                     }
@@ -315,10 +334,10 @@ impl VM {
                 Op::Sub => {
                     let len = self.stack.len();
                     if len >= 2 {
-                        if let (Value::Int(a), Value::Int(b)) = (&self.stack[len-2], &self.stack[len-1]) {
-                            let r = *a - *b;
+                        if let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
+                            let r = a - b;
                             self.stack.pop();
-                            if let Some(v) = self.stack.last_mut() { *v = Value::Int(r); }
+                            if let Some(v) = self.stack.last_mut() { *v = Value::int(r); }
                             continue;
                         }
                     }
@@ -327,10 +346,10 @@ impl VM {
                 Op::Mul => {
                     let len = self.stack.len();
                     if len >= 2 {
-                        if let (Value::Int(a), Value::Int(b)) = (&self.stack[len-2], &self.stack[len-1]) {
-                            let r = *a * *b;
+                        if let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
+                            let r = a * b;
                             self.stack.pop();
-                            if let Some(v) = self.stack.last_mut() { *v = Value::Int(r); }
+                            if let Some(v) = self.stack.last_mut() { *v = Value::int(r); }
                             continue;
                         }
                     }
@@ -340,26 +359,28 @@ impl VM {
                 Op::Mod => { self.binary_op(|a, b| generic_mod(a, b))?; }
                 Op::Pow => { self.binary_op(|a, b| generic_pow(a, b))?; }
                 Op::Neg => {
-                    match self.stack.pop() {
-                        Some(Value::Int(n)) => self.stack.push(Value::Int(-n)),
-                        Some(Value::Float(n)) => self.stack.push(Value::Float(-n)),
-                        Some(v) => return Err(format!("Cannot negate {}", v.type_name())),
-                        None => return Err("VM: stack underflow".to_string()),
+                    let val = self.stack.pop().ok_or("VM: stack underflow")?;
+                    if let Some(n) = val.as_int() {
+                        self.stack.push(Value::int(-n));
+                    } else if let Some(f) = val.as_float() {
+                        self.stack.push(Value::float(-f));
+                    } else {
+                        return Err(format!("Cannot negate {}", val.type_name()));
                     }
                 }
 
                 // ============================================================
                 // GENERIC COMPARISON (with int fast path)
                 // ============================================================
-                Op::Eq => { self.binary_op(|a, b| Ok(Value::Bool(values_equal(&a, &b))))?; }
-                Op::Neq => { self.binary_op(|a, b| Ok(Value::Bool(!values_equal(&a, &b))))?; }
+                Op::Eq => { self.binary_op(|a, b| Ok(Value::bool(values_equal(&a, &b))))?; }
+                Op::Neq => { self.binary_op(|a, b| Ok(Value::bool(!values_equal(&a, &b))))?; }
                 Op::Lt => {
                     let len = self.stack.len();
                     if len >= 2 {
-                        if let (Value::Int(a), Value::Int(b)) = (&self.stack[len-2], &self.stack[len-1]) {
-                            let r = *a < *b;
+                        if let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
+                            let r = a < b;
                             self.stack.pop();
-                            if let Some(v) = self.stack.last_mut() { *v = Value::Bool(r); }
+                            if let Some(v) = self.stack.last_mut() { *v = Value::bool(r); }
                             continue;
                         }
                     }
@@ -368,10 +389,10 @@ impl VM {
                 Op::Gt => {
                     let len = self.stack.len();
                     if len >= 2 {
-                        if let (Value::Int(a), Value::Int(b)) = (&self.stack[len-2], &self.stack[len-1]) {
-                            let r = *a > *b;
+                        if let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
+                            let r = a > b;
                             self.stack.pop();
-                            if let Some(v) = self.stack.last_mut() { *v = Value::Bool(r); }
+                            if let Some(v) = self.stack.last_mut() { *v = Value::bool(r); }
                             continue;
                         }
                     }
@@ -380,10 +401,10 @@ impl VM {
                 Op::Lte => {
                     let len = self.stack.len();
                     if len >= 2 {
-                        if let (Value::Int(a), Value::Int(b)) = (&self.stack[len-2], &self.stack[len-1]) {
-                            let r = *a <= *b;
+                        if let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
+                            let r = a <= b;
                             self.stack.pop();
-                            if let Some(v) = self.stack.last_mut() { *v = Value::Bool(r); }
+                            if let Some(v) = self.stack.last_mut() { *v = Value::bool(r); }
                             continue;
                         }
                     }
@@ -392,10 +413,10 @@ impl VM {
                 Op::Gte => {
                     let len = self.stack.len();
                     if len >= 2 {
-                        if let (Value::Int(a), Value::Int(b)) = (&self.stack[len-2], &self.stack[len-1]) {
-                            let r = *a >= *b;
+                        if let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
+                            let r = a >= b;
                             self.stack.pop();
-                            if let Some(v) = self.stack.last_mut() { *v = Value::Bool(r); }
+                            if let Some(v) = self.stack.last_mut() { *v = Value::bool(r); }
                             continue;
                         }
                     }
@@ -407,56 +428,80 @@ impl VM {
                 // ============================================================
                 Op::Not => {
                     let val = self.stack.pop().ok_or("VM: stack underflow")?;
-                    self.stack.push(Value::Bool(!is_truthy(&val)));
+                    self.stack.push(Value::bool(!val.is_truthy()));
                 }
-                Op::BitAnd => { let b = self.pop_int()?; let a = self.pop_int()?; self.stack.push(Value::Int(a & b)); }
-                Op::BitOr => { let b = self.pop_int()?; let a = self.pop_int()?; self.stack.push(Value::Int(a | b)); }
-                Op::BitXor => { let b = self.pop_int()?; let a = self.pop_int()?; self.stack.push(Value::Int(a ^ b)); }
-                Op::BitNot => { let a = self.pop_int()?; self.stack.push(Value::Int(!a)); }
-                Op::Shl => { let b = self.pop_int()?; let a = self.pop_int()?; self.stack.push(Value::Int(a << b)); }
-                Op::Shr => { let b = self.pop_int()?; let a = self.pop_int()?; self.stack.push(Value::Int(a >> b)); }
+                Op::BitAnd => { let b = self.pop_int()?; let a = self.pop_int()?; self.stack.push(Value::int(a & b)); }
+                Op::BitOr => { let b = self.pop_int()?; let a = self.pop_int()?; self.stack.push(Value::int(a | b)); }
+                Op::BitXor => { let b = self.pop_int()?; let a = self.pop_int()?; self.stack.push(Value::int(a ^ b)); }
+                Op::BitNot => { let a = self.pop_int()?; self.stack.push(Value::int(!a)); }
+                Op::Shl => { let b = self.pop_int()?; let a = self.pop_int()?; self.stack.push(Value::int(a << b)); }
+                Op::Shr => { let b = self.pop_int()?; let a = self.pop_int()?; self.stack.push(Value::int(a >> b)); }
 
                 // ============================================================
                 // INC/DEC
                 // ============================================================
                 Op::IncLocal => {
                     let slot = read_u16!() as usize;
-                    if let Value::Int(n) = &mut self.stack[base!() + slot] { *n += 1; }
+                    let idx = base!() + slot;
+                    if let Some(n) = self.stack[idx].as_int() {
+                        self.stack[idx] = Value::int(n + 1);
+                    }
                 }
                 Op::DecLocal => {
                     let slot = read_u16!() as usize;
-                    if let Value::Int(n) = &mut self.stack[base!() + slot] { *n -= 1; }
+                    let idx = base!() + slot;
+                    if let Some(n) = self.stack[idx].as_int() {
+                        self.stack[idx] = Value::int(n - 1);
+                    }
                 }
                 Op::CompoundAddInt => {
                     let slot = read_u16!() as usize;
                     let rhs = self.pop_int()?;
-                    if let Value::Int(n) = &mut self.stack[base!() + slot] { *n += rhs; }
+                    let idx = base!() + slot;
+                    if let Some(n) = self.stack[idx].as_int() {
+                        self.stack[idx] = Value::int(n + rhs);
+                    }
                 }
                 Op::CompoundSubInt => {
                     let slot = read_u16!() as usize;
                     let rhs = self.pop_int()?;
-                    if let Value::Int(n) = &mut self.stack[base!() + slot] { *n -= rhs; }
+                    let idx = base!() + slot;
+                    if let Some(n) = self.stack[idx].as_int() {
+                        self.stack[idx] = Value::int(n - rhs);
+                    }
                 }
                 Op::PostIncLocal => {
                     let slot = read_u16!() as usize;
-                    let old = self.stack[base!() + slot].clone();
-                    if let Value::Int(n) = &mut self.stack[base!() + slot] { *n += 1; }
+                    let idx = base!() + slot;
+                    let old = self.stack[idx].clone();
+                    if let Some(n) = self.stack[idx].as_int() {
+                        self.stack[idx] = Value::int(n + 1);
+                    }
                     self.stack.push(old);
                 }
                 Op::PostDecLocal => {
                     let slot = read_u16!() as usize;
-                    let old = self.stack[base!() + slot].clone();
-                    if let Value::Int(n) = &mut self.stack[base!() + slot] { *n -= 1; }
+                    let idx = base!() + slot;
+                    let old = self.stack[idx].clone();
+                    if let Some(n) = self.stack[idx].as_int() {
+                        self.stack[idx] = Value::int(n - 1);
+                    }
                     self.stack.push(old);
                 }
                 Op::PreIncLocal => {
                     let slot = read_u16!() as usize;
-                    if let Value::Int(n) = &mut self.stack[base!() + slot] { *n += 1; }
+                    let idx = base!() + slot;
+                    if let Some(n) = self.stack[idx].as_int() {
+                        self.stack[idx] = Value::int(n + 1);
+                    }
                     self.stack.push(self.stack[base!() + slot].clone());
                 }
                 Op::PreDecLocal => {
                     let slot = read_u16!() as usize;
-                    if let Value::Int(n) = &mut self.stack[base!() + slot] { *n -= 1; }
+                    let idx = base!() + slot;
+                    if let Some(n) = self.stack[idx].as_int() {
+                        self.stack[idx] = Value::int(n - 1);
+                    }
                     self.stack.push(self.stack[base!() + slot].clone());
                 }
 
@@ -465,33 +510,48 @@ impl VM {
                 // ============================================================
                 Op::LoadFloat => {
                     let val = read_f64!();
-                    self.stack.push(Value::Float(val));
+                    self.stack.push(Value::float(val));
                 }
-                Op::LoadTrue => self.stack.push(Value::Bool(true)),
-                Op::LoadFalse => self.stack.push(Value::Bool(false)),
-                Op::LoadVoid => self.stack.push(Value::Void),
+                Op::LoadTrue => self.stack.push(Value::bool(true)),
+                Op::LoadFalse => self.stack.push(Value::bool(false)),
+                Op::LoadVoid => self.stack.push(Value::void()),
                 Op::LoadConst => {
                     let idx = read_u16!();
                     let s = self.chunks[ci!()].constants.get(idx).clone();
-                    self.stack.push(Value::String(s));
+                    self.stack.push(Value::string(Rc::from(s.as_ref())));
                 }
 
                 // ============================================================
                 // GLOBALS
                 // ============================================================
                 Op::GetGlobal => {
-                    let idx = read_u16!();
-                    let name = self.chunks[ci!()].constants.get(idx).clone();
-                    let val = self.globals.get(name.as_ref())
-                        .cloned()
-                        .ok_or_else(|| format!("Undefined variable: '{name}'"))?;
+                    let idx = read_u16!() as usize;
+                    if idx >= self.globals.len() {
+                        let name = if idx < self.global_names.len() {
+                            self.global_names[idx].to_string()
+                        } else {
+                            format!("#{idx}")
+                        };
+                        return Err(format!("Undefined variable: '{name}'"));
+                    }
+                    let val = self.globals[idx].clone();
+                    if val.is_void() {
+                        let name = if idx < self.global_names.len() {
+                            self.global_names[idx].to_string()
+                        } else {
+                            format!("#{idx}")
+                        };
+                        return Err(format!("Undefined variable: '{name}'"));
+                    }
                     self.stack.push(val);
                 }
                 Op::SetGlobal => {
-                    let idx = read_u16!();
-                    let name = self.chunks[ci!()].constants.get(idx).clone();
+                    let idx = read_u16!() as usize;
+                    if idx >= self.globals.len() {
+                        self.globals.resize(idx + 1, Value::void());
+                    }
                     let val = self.stack.pop().ok_or("VM: stack underflow")?;
-                    self.globals.insert(name.to_string(), val);
+                    self.globals[idx] = val;
                 }
 
                 // ============================================================
@@ -507,21 +567,22 @@ impl VM {
                     let mut lambda_found = false;
                     if let Some(slot) = self.locals_lookup(&name) {
                         let val = self.stack[base!() + slot as usize].clone();
-                        if let Value::Lambda { name: fn_name, resolution, bound_args } = val {
+                        if let Some(data) = val.as_lambda() {
                             lambda_found = true;
                             let arg_start = self.stack.len() - argc as usize;
-                            let call_args: Vec<Value> = if bound_args.is_empty() {
+                            let call_args: Vec<Value> = if data.bound_args.is_empty() {
                                 self.stack.drain(arg_start..).collect()
                             } else {
                                 self.stack.truncate(arg_start);
-                                bound_args
+                                data.bound_args.clone()
                             };
-                            let resolution = match resolution {
+                            let resolution = match data.resolution {
                                 1 => Resolution::OwnFirst,
                                 2 => Resolution::SystemOnly,
                                 _ => Resolution::Normal,
                             };
-                            match interp.call_resolved(&fn_name, resolution, call_args) {
+                            let lambda_name = data.name.clone();
+                            match interp.call_resolved(&lambda_name, resolution, call_args) {
                                 Ok(val) => self.stack.push(val),
                                 Err(e) => {
                             if let Some(tp) = self.try_stack.pop() {
@@ -539,21 +600,26 @@ impl VM {
                     if lambda_found { continue; }
 
                     // Also check globals for lambdas
-                    if let Some(val) = self.globals.get(name.as_ref()).cloned() {
-                        if let Value::Lambda { name: fn_name, resolution, bound_args } = val {
+                    let global_val = self.global_name_to_slot.get(name.as_ref())
+                        .and_then(|&slot| self.globals.get(slot as usize))
+                        .filter(|v| !v.is_void())
+                        .cloned();
+                    if let Some(val) = global_val {
+                        if let Some(data) = val.as_lambda() {
                             let arg_start = self.stack.len() - argc as usize;
-                            let call_args: Vec<Value> = if bound_args.is_empty() {
+                            let call_args: Vec<Value> = if data.bound_args.is_empty() {
                                 self.stack.drain(arg_start..).collect()
                             } else {
                                 self.stack.truncate(arg_start);
-                                bound_args
+                                data.bound_args.clone()
                             };
-                            let resolution = match resolution {
+                            let resolution = match data.resolution {
                                 1 => Resolution::OwnFirst,
                                 2 => Resolution::SystemOnly,
                                 _ => Resolution::Normal,
                             };
-                            match interp.call_resolved(&fn_name, resolution, call_args) {
+                            let lambda_name = data.name.clone();
+                            match interp.call_resolved(&lambda_name, resolution, call_args) {
                                 Ok(val) => self.stack.push(val),
                                 Err(e) => {
                             if let Some(tp) = self.try_stack.pop() {
@@ -606,13 +672,35 @@ impl VM {
                 }
                 Op::CallBuiltin => {
                     let name_idx = read_u16!();
-                    let argc = read_u8!();
+                    let argc = read_u8!() as usize;
                     let name = self.chunks[ci!()].constants.get(name_idx).clone();
-                    let arg_start = self.stack.len() - argc as usize;
-                    let args: Vec<Value> = self.stack.drain(arg_start..).collect();
-                    match interp.call_resolved(&name, Resolution::SystemOnly, args) {
-                        Ok(val) => self.stack.push(val),
+                    let arg_start = self.stack.len() - argc;
+                    // Validate and get handler using stack slice directly — zero allocation
+                    let handler = match interp.registry.validate_and_get_handler(&name, &self.stack[arg_start..]) {
+                        Some(Ok(h)) => h,
+                        Some(Err(e)) => {
+                            self.stack.truncate(arg_start);
+                            if let Some(tp) = self.try_stack.pop() {
+                                self.last_error = Some(e);
+                                self.stack.truncate(tp.stack_depth);
+                                frame_idx = tp.frame_idx;
+                                self.frames[frame_idx].ip = tp.error_ip;
+                                continue;
+                            }
+                            return Err(e);
+                        }
+                        None => {
+                            self.stack.truncate(arg_start);
+                            return Err(format!("Undefined builtin: '{name}'"));
+                        }
+                    };
+                    match handler(&self.stack[arg_start..], interp) {
+                        Ok(val) => {
+                            self.stack.truncate(arg_start);
+                            self.stack.push(val);
+                        }
                         Err(e) => {
+                            self.stack.truncate(arg_start);
                             if let Some(tp) = self.try_stack.pop() {
                                 self.last_error = Some(e);
                                 self.stack.truncate(tp.stack_depth);
@@ -640,7 +728,7 @@ impl VM {
                     let start = self.stack.len() - count * 2;
                     let pairs: Vec<Value> = self.stack.drain(start..).collect();
                     for pair in pairs.chunks(2) {
-                        if let Value::String(k) = &pair[0] {
+                        if let Some(k) = pair[0].as_str_ref() {
                             map.insert(k.to_string(), pair[1].clone());
                         }
                     }
@@ -655,21 +743,19 @@ impl VM {
                     let idx = read_u16!();
                     let field = self.chunks[ci!()].constants.get(idx).clone();
                     let obj = self.stack.pop().ok_or("VM: stack underflow")?;
-                    match &obj {
-                        Value::Object(rc) => {
-                            let val = rc.borrow().fields.get(field.as_ref()).cloned()
-                                .ok_or_else(|| format!("Field '{field}' not found"))?;
-                            self.stack.push(val);
+                    if let Some(rc) = obj.as_object_ref() {
+                        let val = rc.borrow().fields.get(field.as_ref()).cloned()
+                            .ok_or_else(|| format!("Field '{field}' not found"))?;
+                        self.stack.push(val);
+                    } else if let Some(data) = obj.as_command_result() {
+                        match field.as_ref() {
+                            "status" => self.stack.push(Value::int(i64::from(data.status))),
+                            "out" => self.stack.push(Value::string_from(&data.out)),
+                            "err" => self.stack.push(Value::string_from(&data.err)),
+                            _ => return Err(format!("CommandResult has no field '{field}'")),
                         }
-                        Value::CommandResult { status, out, err } => {
-                            match field.as_ref() {
-                                "status" => self.stack.push(Value::Int(i64::from(*status))),
-                                "out" => self.stack.push(Value::String(Rc::from(out.as_str()))),
-                                "err" => self.stack.push(Value::String(Rc::from(err.as_str()))),
-                                _ => return Err(format!("CommandResult has no field '{field}'")),
-                            }
-                        }
-                        _ => return Err(format!("Cannot access field on {}", obj.type_name())),
+                    } else {
+                        return Err(format!("Cannot access field on {}", obj.type_name()));
                     }
                 }
                 Op::MakeString => {
@@ -680,12 +766,12 @@ impl VM {
                     for part in &parts {
                         result.push_str(&format!("{part}"));
                     }
-                    self.stack.push(Value::String(Rc::from(result)));
+                    self.stack.push(Value::string(Rc::from(result)));
                 }
                 Op::MakeRange => {
                     let end = self.pop_int()?;
                     let start = self.pop_int()?;
-                    let items: Vec<Value> = (start..=end).map(Value::Int).collect();
+                    let items: Vec<Value> = (start..=end).map(Value::int).collect();
                     self.stack.push(new_list(items));
                 }
 
@@ -701,9 +787,10 @@ impl VM {
                     // so builtins (map, filter, etc.) can call them via the tree-walker.
                 }
                 Op::Free => {
-                    let idx = read_u16!();
-                    let name = self.chunks[ci!()].constants.get(idx).clone();
-                    self.globals.remove(name.as_ref());
+                    let idx = read_u16!() as usize;
+                    if idx < self.globals.len() {
+                        self.globals[idx] = Value::void();
+                    }
                 }
                 Op::Throw => {
                     let val = self.stack.pop().ok_or("VM: stack underflow")?;
@@ -740,8 +827,9 @@ impl VM {
                 Op::SubLocalImm => {
                     let slot = read_u16!() as usize;
                     let imm = read_i64!();
-                    if let Value::Int(n) = &self.stack[base!() + slot] {
-                        self.stack.push(Value::Int(*n - imm));
+                    let idx = base!() + slot;
+                    if let Some(n) = self.stack[idx].as_int() {
+                        self.stack.push(Value::int(n - imm));
                     } else {
                         return Err("SubLocalImm: expected int local".to_string());
                     }
@@ -749,8 +837,9 @@ impl VM {
                 Op::AddLocalImm => {
                     let slot = read_u16!() as usize;
                     let imm = read_i64!();
-                    if let Value::Int(n) = &self.stack[base!() + slot] {
-                        self.stack.push(Value::Int(*n + imm));
+                    let idx = base!() + slot;
+                    if let Some(n) = self.stack[idx].as_int() {
+                        self.stack.push(Value::int(n + imm));
                     } else {
                         return Err("AddLocalImm: expected int local".to_string());
                     }
@@ -759,8 +848,9 @@ impl VM {
                     let slot = read_u16!() as usize;
                     let imm = read_i64!();
                     let offset = read_i32!();
-                    if let Value::Int(n) = &self.stack[base!() + slot] {
-                        if *n > imm {
+                    let idx = base!() + slot;
+                    if let Some(n) = self.stack[idx].as_int() {
+                        if n > imm {
                             let cur_ip = ip!();
                             self.frames[frame_idx].ip = (cur_ip as i32 + offset) as usize;
                         }
@@ -770,8 +860,9 @@ impl VM {
                     let slot = read_u16!() as usize;
                     let imm = read_i64!();
                     let offset = read_i32!();
-                    if let Value::Int(n) = &self.stack[base!() + slot] {
-                        if *n <= imm {
+                    let idx = base!() + slot;
+                    if let Some(n) = self.stack[idx].as_int() {
+                        if n <= imm {
                             let cur_ip = ip!();
                             self.frames[frame_idx].ip = (cur_ip as i32 + offset) as usize;
                         }
@@ -804,7 +895,7 @@ impl VM {
                     let send_val = self.send_stack.last()
                         .and_then(|v| v.clone())
                         .ok_or("$ used outside of send context")?;
-                    if let Value::List(l) = &send_val {
+                    if let Some(l) = send_val.as_list_ref() {
                         let val = l.borrow().get(idx).cloned()
                             .ok_or_else(|| format!("${idx} out of bounds"))?;
                         self.stack.push(val);
@@ -818,15 +909,15 @@ impl VM {
                     let send_val = self.send_stack.last()
                         .and_then(|v| v.clone())
                         .ok_or("$ used outside of send context")?;
-                    if let Value::Object(rc) = &send_val {
+                    if let Some(rc) = send_val.as_object_ref() {
                         let val = rc.borrow().fields.get(field.as_ref()).cloned()
                             .ok_or_else(|| format!("${field} not found"))?;
                         self.stack.push(val);
-                    } else if let Value::CommandResult { status, out, err } = &send_val {
+                    } else if let Some(data) = send_val.as_command_result() {
                         match field.as_ref() {
-                            "status" => self.stack.push(Value::Int(i64::from(*status))),
-                            "out" => self.stack.push(Value::String(Rc::from(out.as_str()))),
-                            "err" => self.stack.push(Value::String(Rc::from(err.as_str()))),
+                            "status" => self.stack.push(Value::int(i64::from(data.status))),
+                            "out" => self.stack.push(Value::string_from(&data.out)),
+                            "err" => self.stack.push(Value::string_from(&data.err)),
                             _ => return Err(format!("${field} not found on CommandResult")),
                         }
                     } else {
@@ -844,62 +935,52 @@ impl VM {
                     let name = self.chunks[ci!()].constants.get(name_idx).clone();
                     let start = self.stack.len() - bound_count;
                     let bound_args: Vec<Value> = self.stack.drain(start..).collect();
-                    self.stack.push(Value::Lambda {
+                    self.stack.push(Value::lambda(crate::interpreter::value::LambdaData {
                         name: name.to_string(),
                         resolution: res,
                         bound_args,
-                    });
+                    }));
                 }
 
                 // ============================================================
                 // ERROR HANDLING
                 // ============================================================
                 Op::ErrorCheck => {
-                    let name_idx = read_u16!();
-                    let name = self.chunks[ci!()].constants.get(name_idx).clone();
-                    let is_ok = self.ok_vars.contains(name.as_ref()) ||
-                        (!self.error_vars.contains_key(name.as_ref()) &&
-                         self.globals.get(name.as_ref()).map_or(false, |v| !matches!(v, Value::Void)));
-                    self.stack.push(Value::Bool(is_ok));
+                    let slot = read_u16!();
+                    let is_ok = self.ok_vars.contains(&slot) ||
+                        (!self.error_vars.contains_key(&slot) &&
+                         self.globals.get(slot as usize).map_or(false, |v| !v.is_void()));
+                    self.stack.push(Value::bool(is_ok));
                 }
                 Op::ErrorField => {
-                    let name_idx = read_u16!();
+                    let slot = read_u16!();
                     let _field_idx = read_u16!();
-                    let name = self.chunks[ci!()].constants.get(name_idx).clone();
-                    let msg = self.error_vars.get(name.as_ref())
+                    let msg = self.error_vars.get(&slot)
                         .or(self.last_error.as_ref())
                         .cloned()
                         .unwrap_or_default();
-                    self.stack.push(Value::String(Rc::from(msg)));
+                    self.stack.push(Value::string(Rc::from(msg)));
                 }
                 Op::SetErrorTolerant => {
                     // Mark variable as OK (no error) — called after successful assignment
-                    let name_idx = read_u16!();
-                    let name = self.chunks[ci!()].constants.get(name_idx).clone();
-                    self.ok_vars.insert(name.to_string());
-                    self.error_vars.remove(name.as_ref());
+                    let slot = read_u16!();
+                    self.ok_vars.insert(slot);
+                    self.error_vars.remove(&slot);
                 }
                 Op::RecordError => {
                     // Store last_error into error_vars for the named variable
-                    let name_idx = read_u16!();
-                    let name = self.chunks[ci!()].constants.get(name_idx).clone();
+                    let slot = read_u16!();
                     if let Some(ref err) = self.last_error {
-                        self.error_vars.insert(name.to_string(), err.clone());
+                        self.error_vars.insert(slot, err.clone());
                     }
-                    self.ok_vars.remove(name.as_ref());
+                    self.ok_vars.remove(&slot);
                 }
                 Op::OptionalCheck => {
-                    let name_idx = read_u16!();
-                    let name = self.chunks[ci!()].constants.get(name_idx).clone();
-                    // Check if variable is Void (not provided)
-                    if let Some(slot) = self.locals_lookup(&name) {
-                        let val = &self.stack[base!() + slot as usize];
-                        self.stack.push(Value::Bool(!matches!(val, Value::Void)));
-                    } else if let Some(val) = self.globals.get(name.as_ref()) {
-                        self.stack.push(Value::Bool(!matches!(val, Value::Void)));
-                    } else {
-                        self.stack.push(Value::Bool(false));
-                    }
+                    // Now only used for global variables (locals are resolved at compile time)
+                    let slot = read_u16!() as usize;
+                    let is_present = self.globals.get(slot)
+                        .map_or(false, |v| !v.is_void());
+                    self.stack.push(Value::bool(is_present));
                 }
 
                 // ============================================================
@@ -909,20 +990,18 @@ impl VM {
                     let val = self.stack.pop().ok_or("VM: stack underflow")?;
                     let index = self.stack.pop().ok_or("VM: stack underflow")?;
                     let target = self.stack.pop().ok_or("VM: stack underflow")?;
-                    match (target, index) {
-                        (Value::List(l), Value::Int(i)) => {
-                            let mut list = l.borrow_mut();
-                            let idx = if i < 0 { list.len() as i64 + i } else { i } as usize;
-                            if idx < list.len() {
-                                list[idx] = val;
-                            } else {
-                                return Err(format!("Index {i} out of bounds"));
-                            }
+                    if let (Some(l), Some(i)) = (target.as_list_ref(), index.as_int()) {
+                        let mut list = l.borrow_mut();
+                        let idx = if i < 0 { list.len() as i64 + i } else { i } as usize;
+                        if idx < list.len() {
+                            list[idx] = val;
+                        } else {
+                            return Err(format!("Index {i} out of bounds"));
                         }
-                        (Value::Object(rc), Value::String(key)) => {
-                            rc.borrow_mut().fields.insert(key.to_string(), val);
-                        }
-                        (t, i) => return Err(format!("Cannot index-assign {} with {}", t.type_name(), i.type_name())),
+                    } else if let (Some(rc), Some(key)) = (target.as_object_ref(), index.as_str_ref()) {
+                        rc.borrow_mut().fields.insert(key.to_string(), val);
+                    } else {
+                        return Err(format!("Cannot index-assign {} with {}", target.type_name(), index.type_name()));
                     }
                 }
                 Op::FieldSet => {
@@ -930,7 +1009,7 @@ impl VM {
                     let field = self.chunks[ci!()].constants.get(field_idx).clone();
                     let val = self.stack.pop().ok_or("VM: stack underflow")?;
                     let target = self.stack.pop().ok_or("VM: stack underflow")?;
-                    if let Value::Object(rc) = target {
+                    if let Some(rc) = target.as_object_ref() {
                         rc.borrow_mut().fields.insert(field.to_string(), val);
                     } else {
                         return Err(format!("Cannot field-assign on {}", target.type_name()));
@@ -969,9 +1048,27 @@ impl VM {
                     let mut sub_chunks = crate::vm::compiler::Compiler::compile(&stmts)?;
                     let base_idx = self.chunks.len();
 
-                    // Patch all chunk-index references in sub-chunks by adding base_idx
+                    // Build a mapping from sub-script global slots → main VM global slots
+                    let mut slot_remap: std::collections::HashMap<u16, u16> = std::collections::HashMap::new();
+                    if !sub_chunks.is_empty() {
+                        for (name, &sub_slot) in &sub_chunks[0].global_slots {
+                            let main_slot = if let Some(&existing) = self.global_name_to_slot.get(name) {
+                                existing
+                            } else {
+                                let new_slot = self.global_names.len() as u16;
+                                self.global_names.push(Rc::from(name.as_str()));
+                                self.global_name_to_slot.insert(name.clone(), new_slot);
+                                self.globals.push(Value::void());
+                                new_slot
+                            };
+                            slot_remap.insert(sub_slot, main_slot);
+                        }
+                    }
+
+                    // Patch all chunk-index references and global slot indices in sub-chunks
                     for chunk in &mut sub_chunks {
                         patch_chunk_indices(&mut chunk.code, base_idx as u16);
+                        patch_global_slots(&mut chunk.code, &slot_remap);
                     }
 
                     // Register function chunks in fn_table
@@ -1001,16 +1098,18 @@ impl VM {
                     interp.env.use_paths.insert(alias.to_ascii_lowercase(), path.to_string());
                 }
                 Op::DefineEnum => {
-                    let name_idx = read_u16!();
+                    let global_slot = read_u16!() as usize;
                     let variant_count = read_u16!() as usize;
-                    let name = self.chunks[ci!()].constants.get(name_idx).clone();
                     let mut map = indexmap::IndexMap::new();
                     for i in 0..variant_count {
                         let vidx = read_u16!();
                         let vname = self.chunks[ci!()].constants.get(vidx).clone();
-                        map.insert(vname.to_string(), Value::Int(i as i64));
+                        map.insert(vname.to_string(), Value::int(i as i64));
                     }
-                    self.globals.insert(name.to_string(), new_object(map));
+                    if global_slot >= self.globals.len() {
+                        self.globals.resize(global_slot + 1, Value::void());
+                    }
+                    self.globals[global_slot] = new_object(map);
                 }
                 Op::Alias => {
                     let name_idx = read_u16!();
@@ -1021,7 +1120,7 @@ impl VM {
                 }
                 Op::Atomic => {
                     let val = self.stack.pop().ok_or("VM: stack underflow")?;
-                    self.stack.push(Value::Atomic(crate::interpreter::value::AtomicValue::new(&val)));
+                    self.stack.push(Value::atomic(crate::interpreter::value::AtomicValue::new(&val)));
                 }
                 Op::TryBegin => {
                     let offset = read_i32!();
@@ -1061,8 +1160,7 @@ impl VM {
     #[inline(always)]
     fn pop_int(&mut self) -> Result<i64, String> {
         match self.stack.pop() {
-            Some(Value::Int(n)) => Ok(n),
-            Some(other) => Err(format!("Expected int, got {}", other.type_name())),
+            Some(ref val) => val.as_int().ok_or_else(|| format!("Expected int, got {}", val.type_name())),
             None => Err("VM: stack underflow".to_string()),
         }
     }
@@ -1073,125 +1171,258 @@ impl VM {
         self.stack.push(f(a, b)?);
         Ok(())
     }
+
+    // --- Public helpers for JIT extern "C" functions ---
+
+    pub(crate) fn get_global(&self, idx: usize) -> Value {
+        if idx < self.globals.len() {
+            self.globals[idx].clone()
+        } else {
+            Value::void()
+        }
+    }
+
+    pub(crate) fn set_global(&mut self, idx: usize, val: Value) {
+        if idx >= self.globals.len() {
+            self.globals.resize(idx + 1, Value::void());
+        }
+        self.globals[idx] = val;
+    }
+
+    pub(crate) fn fn_table_lookup(&self, name: &str) -> Option<&usize> {
+        self.fn_table.get(name)
+    }
+
+    pub(crate) fn register_fn(&mut self, name: &str, chunk_idx: usize) {
+        self.fn_table.insert(name.to_string(), chunk_idx);
+    }
+
+    pub(crate) fn error_check(&self, slot: u16) -> bool {
+        self.ok_vars.contains(&slot) ||
+            (!self.error_vars.contains_key(&slot) &&
+             self.globals.get(slot as usize).map_or(false, |v| !v.is_void()))
+    }
+
+    pub(crate) fn error_field(&self, slot: u16) -> String {
+        self.error_vars.get(&slot)
+            .or(self.last_error.as_ref())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn set_error_tolerant(&mut self, slot: u16) {
+        self.ok_vars.insert(slot);
+        self.error_vars.remove(&slot);
+    }
+
+    pub(crate) fn record_error(&mut self, slot: u16) {
+        if let Some(ref err) = self.last_error {
+            self.error_vars.insert(slot, err.clone());
+        }
+        self.ok_vars.remove(&slot);
+    }
+
+    pub(crate) fn optional_check(&self, slot: usize) -> bool {
+        self.globals.get(slot).map_or(false, |v| !v.is_void())
+    }
+
+    pub(crate) fn get_dollar_index(&self, idx: usize) -> Option<Value> {
+        let send_val = self.send_stack.last()?.clone()?;
+        if let Some(l) = send_val.as_list_ref() {
+            l.borrow().get(idx).cloned()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn get_dollar_field(&self, field: &str) -> Option<Value> {
+        let send_val = self.send_stack.last()?.clone()?;
+        if let Some(rc) = send_val.as_object_ref() {
+            rc.borrow().fields.get(field).cloned()
+        } else if let Some(data) = send_val.as_command_result() {
+            match field {
+                "status" => Some(Value::int(i64::from(data.status))),
+                "out" => Some(Value::string_from(&data.out)),
+                "err" => Some(Value::string_from(&data.err)),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn get_dollar(&self) -> Option<Value> {
+        self.send_stack.last()?.clone()
+    }
+
+    pub(crate) fn push_send_ctx(&mut self, val: Value) {
+        self.send_stack.push(Some(val));
+    }
+
+    pub(crate) fn pop_send_ctx(&mut self) {
+        self.send_stack.pop();
+    }
 }
 
 // --- Helpers ---
 
-#[inline(always)]
-fn is_truthy(val: &Value) -> bool {
-    match val {
-        Value::Bool(b) => *b,
-        Value::Int(n) => *n != 0,
-        Value::Float(n) => *n != 0.0,
-        Value::String(s) => !s.is_empty(),
-        Value::Void => false,
-        _ => true,
-    }
-}
-
 fn values_equal(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Int(x), Value::Int(y)) => x == y,
-        (Value::Float(x), Value::Float(y)) => (x - y).abs() < f64::EPSILON,
-        (Value::String(x), Value::String(y)) => x == y,
-        (Value::Bool(x), Value::Bool(y)) => x == y,
-        (Value::Void, Value::Void) => true,
+    match (a.kind(), b.kind()) {
+        (VK::Int(x), VK::Int(y)) => x == y,
+        (VK::Float(x), VK::Float(y)) => (x - y).abs() < f64::EPSILON,
+        (VK::String(x), VK::String(y)) => x == y,
+        (VK::Bool(x), VK::Bool(y)) => x == y,
+        (VK::Void, VK::Void) => true,
         _ => false,
     }
 }
 
 fn generic_add(a: Value, b: Value) -> Result<Value, String> {
-    match (&a, &b) {
-        (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x + y)),
-        (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x + y)),
-        (Value::Int(x), Value::Float(y)) => Ok(Value::Float(*x as f64 + y)),
-        (Value::Float(x), Value::Int(y)) => Ok(Value::Float(x + *y as f64)),
-        (Value::String(x), Value::String(y)) => Ok(Value::String(Rc::from(format!("{x}{y}")))),
+    match (a.kind(), b.kind()) {
+        (VK::Int(x), VK::Int(y)) => Ok(Value::int(x + y)),
+        (VK::Float(x), VK::Float(y)) => Ok(Value::float(x + y)),
+        (VK::Int(x), VK::Float(y)) => Ok(Value::float(x as f64 + y)),
+        (VK::Float(x), VK::Int(y)) => Ok(Value::float(x + y as f64)),
+        (VK::String(x), VK::String(y)) => Ok(Value::string(Rc::from(format!("{x}{y}")))),
         _ => Err(format!("Cannot add {} and {}", a.type_name(), b.type_name())),
     }
 }
 
 fn generic_sub(a: Value, b: Value) -> Result<Value, String> {
-    match (&a, &b) {
-        (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x - y)),
-        (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x - y)),
-        (Value::Int(x), Value::Float(y)) => Ok(Value::Float(*x as f64 - y)),
-        (Value::Float(x), Value::Int(y)) => Ok(Value::Float(x - *y as f64)),
+    match (a.kind(), b.kind()) {
+        (VK::Int(x), VK::Int(y)) => Ok(Value::int(x - y)),
+        (VK::Float(x), VK::Float(y)) => Ok(Value::float(x - y)),
+        (VK::Int(x), VK::Float(y)) => Ok(Value::float(x as f64 - y)),
+        (VK::Float(x), VK::Int(y)) => Ok(Value::float(x - y as f64)),
         _ => Err(format!("Cannot subtract {} from {}", b.type_name(), a.type_name())),
     }
 }
 
 fn generic_mul(a: Value, b: Value) -> Result<Value, String> {
-    match (&a, &b) {
-        (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x * y)),
-        (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x * y)),
-        (Value::Int(x), Value::Float(y)) => Ok(Value::Float(*x as f64 * y)),
-        (Value::Float(x), Value::Int(y)) => Ok(Value::Float(x * *y as f64)),
+    match (a.kind(), b.kind()) {
+        (VK::Int(x), VK::Int(y)) => Ok(Value::int(x * y)),
+        (VK::Float(x), VK::Float(y)) => Ok(Value::float(x * y)),
+        (VK::Int(x), VK::Float(y)) => Ok(Value::float(x as f64 * y)),
+        (VK::Float(x), VK::Int(y)) => Ok(Value::float(x * y as f64)),
         _ => Err(format!("Cannot multiply {} and {}", a.type_name(), b.type_name())),
     }
 }
 
 fn generic_div(a: Value, b: Value) -> Result<Value, String> {
-    match (&a, &b) {
-        (Value::Int(x), Value::Int(y)) => {
-            if *y == 0 { return Err("Division by zero".to_string()); }
-            Ok(Value::Int(x / y))
+    match (a.kind(), b.kind()) {
+        (VK::Int(x), VK::Int(y)) => {
+            if y == 0 { return Err("Division by zero".to_string()); }
+            Ok(Value::int(x / y))
         }
-        (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x / y)),
-        (Value::Int(x), Value::Float(y)) => Ok(Value::Float(*x as f64 / y)),
-        (Value::Float(x), Value::Int(y)) => Ok(Value::Float(x / *y as f64)),
+        (VK::Float(x), VK::Float(y)) => Ok(Value::float(x / y)),
+        (VK::Int(x), VK::Float(y)) => Ok(Value::float(x as f64 / y)),
+        (VK::Float(x), VK::Int(y)) => Ok(Value::float(x / y as f64)),
         _ => Err(format!("Cannot divide {} by {}", a.type_name(), b.type_name())),
     }
 }
 
 fn generic_mod(a: Value, b: Value) -> Result<Value, String> {
-    match (&a, &b) {
-        (Value::Int(x), Value::Int(y)) => {
-            if *y == 0 { return Err("Modulo by zero".to_string()); }
-            Ok(Value::Int(x % y))
+    match (a.kind(), b.kind()) {
+        (VK::Int(x), VK::Int(y)) => {
+            if y == 0 { return Err("Modulo by zero".to_string()); }
+            Ok(Value::int(x % y))
         }
         _ => Err(format!("Cannot modulo {} by {}", a.type_name(), b.type_name())),
     }
 }
 
 fn generic_pow(a: Value, b: Value) -> Result<Value, String> {
-    match (&a, &b) {
-        (Value::Int(base), Value::Int(exp)) => {
-            if let Ok(e) = u32::try_from(*exp) {
-                Ok(Value::Int(base.pow(e)))
+    match (a.kind(), b.kind()) {
+        (VK::Int(base), VK::Int(exp)) => {
+            if let Ok(e) = u32::try_from(exp) {
+                Ok(Value::int(base.pow(e)))
             } else {
-                Ok(Value::Float((*base as f64).powf(*exp as f64)))
+                Ok(Value::float((base as f64).powf(exp as f64)))
             }
         }
-        (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x.powf(*y))),
-        (Value::Int(x), Value::Float(y)) => Ok(Value::Float((*x as f64).powf(*y))),
-        (Value::Float(x), Value::Int(y)) => Ok(Value::Float(x.powf(*y as f64))),
+        (VK::Float(x), VK::Float(y)) => Ok(Value::float(x.powf(y))),
+        (VK::Int(x), VK::Float(y)) => Ok(Value::float((x as f64).powf(y))),
+        (VK::Float(x), VK::Int(y)) => Ok(Value::float(x.powf(y as f64))),
         _ => Err(format!("Cannot exponentiate {} by {}", a.type_name(), b.type_name())),
     }
 }
 
 fn generic_compare(a: Value, b: Value, pred: impl FnOnce(std::cmp::Ordering) -> bool) -> Result<Value, String> {
-    let ord = match (&a, &b) {
-        (Value::Int(x), Value::Int(y)) => x.cmp(y),
-        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-        (Value::String(x), Value::String(y)) => x.cmp(y),
+    let ord = match (a.kind(), b.kind()) {
+        (VK::Int(x), VK::Int(y)) => x.cmp(&y),
+        (VK::Float(x), VK::Float(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+        (VK::String(x), VK::String(y)) => x.cmp(y),
         _ => return Err(format!("Cannot compare {} and {}", a.type_name(), b.type_name())),
     };
-    Ok(Value::Bool(pred(ord)))
+    Ok(Value::bool(pred(ord)))
 }
 
 fn vm_index(target: &Value, index: &Value) -> Result<Value, String> {
-    match (target, index) {
-        (Value::List(l), Value::Int(i)) => {
-            let list = l.borrow();
-            let idx = if *i < 0 { list.len() as i64 + i } else { *i } as usize;
-            list.get(idx).cloned().ok_or_else(|| format!("Index {i} out of bounds"))
+    if let (Some(l), Some(i)) = (target.as_list_ref(), index.as_int()) {
+        let list = l.borrow();
+        let idx = if i < 0 { list.len() as i64 + i } else { i } as usize;
+        list.get(idx).cloned().ok_or_else(|| format!("Index {i} out of bounds"))
+    } else if let (Some(rc), Some(key)) = (target.as_object_ref(), index.as_str_ref()) {
+        rc.borrow().fields.get(key).cloned()
+            .ok_or_else(|| format!("Field '{key}' not found"))
+    } else {
+        Err(format!("Cannot index {} with {}", target.type_name(), index.type_name()))
+    }
+}
+
+/// Remap global slot indices in bytecode using a slot_remap table.
+fn patch_global_slots(code: &mut [u8], slot_remap: &std::collections::HashMap<u16, u16>) {
+    if slot_remap.is_empty() { return; }
+    fn remap(code: &mut [u8], pc: usize, slot_remap: &std::collections::HashMap<u16, u16>) {
+        let old = u16::from_le_bytes([code[pc], code[pc+1]]);
+        if let Some(&new) = slot_remap.get(&old) {
+            code[pc..pc+2].copy_from_slice(&new.to_le_bytes());
         }
-        (Value::Object(rc), Value::String(key)) => {
-            rc.borrow().fields.get(key.as_ref()).cloned()
-                .ok_or_else(|| format!("Field '{key}' not found"))
+    }
+    let mut pc = 0;
+    while pc < code.len() {
+        let op: Op = unsafe { std::mem::transmute(code[pc]) };
+        pc += 1;
+        match op {
+            // Opcodes whose u16 operand is a global slot index
+            Op::GetGlobal | Op::SetGlobal | Op::Free
+            | Op::ErrorCheck | Op::SetErrorTolerant | Op::RecordError
+            | Op::OptionalCheck => {
+                remap(code, pc, slot_remap);
+                pc += 2;
+            }
+            Op::ErrorField => {
+                remap(code, pc, slot_remap); // first u16 is global slot
+                pc += 4; // skip both u16s
+            }
+            Op::DefineEnum => {
+                remap(code, pc, slot_remap); // first u16 is global slot
+                pc += 2;
+                let count = u16::from_le_bytes([code[pc], code[pc+1]]) as usize;
+                pc += 2;
+                pc += count * 2; // variant name indices (constant pool, not remapped)
+            }
+            // Skip operands for non-global opcodes (same sizes as patch_chunk_indices)
+            Op::DefineFunction => pc += 4,
+            Op::CallLocal => pc += 3,
+            Op::LoadInt | Op::LoadFloat => pc += 8,
+            Op::SubLocalImm | Op::AddLocalImm => pc += 10,
+            Op::BranchIfLocalGtImm | Op::BranchIfLocalLteImm => pc += 14,
+            Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::Loop
+            | Op::TryBegin | Op::TryEnd => pc += 4,
+            Op::Call => pc += 4,
+            Op::CallBuiltin => pc += 3,
+            Op::MakeLambda => pc += 4,
+            Op::Alias | Op::Use => pc += 4,
+            Op::GetLocal | Op::SetLocal
+            | Op::LoadConst | Op::FieldGet | Op::FieldSet | Op::MakeList
+            | Op::MakeObject | Op::MakeString | Op::MakeRange
+            | Op::IncLocal | Op::DecLocal | Op::PostIncLocal | Op::PostDecLocal
+            | Op::PreIncLocal | Op::PreDecLocal | Op::CompoundAddInt | Op::CompoundSubInt
+            | Op::GetDollarIndex | Op::GetDollarField
+            | Op::Import | Op::GetLocalInt => pc += 2,
+            _ => {} // 0-operand opcodes
         }
-        _ => Err(format!("Cannot index {} with {}", target.type_name(), index.type_name())),
     }
 }
 

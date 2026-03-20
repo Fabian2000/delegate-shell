@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::LazyLock;
 use std::sync::Mutex;
-use crate::interpreter::value::Value;
+use crate::interpreter::value::{Value, ValueKind as VK};
 
 /// Cache for PATH lookups: name -> Option<path>.
 static CMD_CACHE: LazyLock<Mutex<HashMap<String, Option<PathBuf>>>> =
@@ -64,19 +64,19 @@ fn exec_command(path: PathBuf, name: &str, args: &[Value]) -> Result<Value, Stri
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     // Exes never throw — always return Result { status, out, err }
-    Ok(Value::CommandResult {
+    Ok(Value::command_result(crate::interpreter::value::CommandResultData {
         status,
         out: stdout,
         err: stderr,
-    })
+    }))
 }
 
 fn value_to_arg(val: &Value) -> String {
-    match val {
-        Value::String(s) => s.to_string(),
-        Value::Int(n) => n.to_string(),
-        Value::Float(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        other => other.to_string(),
+    match val.kind() {
+        VK::String(s) => s.to_string(),
+        VK::Int(n) => n.to_string(),
+        VK::Float(n) => n.to_string(),
+        VK::Bool(b) => b.to_string(),
+        _ => val.to_string(),
     }
 }

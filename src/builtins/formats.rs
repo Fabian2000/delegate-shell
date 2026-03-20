@@ -1,6 +1,6 @@
 use std::rc::Rc;
 use indexmap::IndexMap;
-use crate::interpreter::value::{Value, new_list, new_object};
+use crate::interpreter::value::{Value, ValueKind as VK, new_list, new_object};
 use super::registry::{BuiltinRegistry, Param, Type};
 
 pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
@@ -25,7 +25,7 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
 // === JSON ===
 
 fn builtin_from_json(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
     let json: serde_json::Value = serde_json::from_str(s)
         .map_err(|e| format!("from_json(): {e}"))?;
     Ok(json_to_value(&json))
@@ -35,20 +35,20 @@ fn builtin_to_json(args: &[Value]) -> Result<Value, String> {
     let json = value_to_json(&args[0])?;
     let s = serde_json::to_string_pretty(&json)
         .map_err(|e| format!("to_json(): {e}"))?;
-    Ok(Value::String(Rc::from(s)))
+    Ok(Value::string(Rc::from(s)))
 }
 
 fn json_to_value(json: &serde_json::Value) -> Value {
     match json {
-        serde_json::Value::Null => Value::Void,
-        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Null => Value::void(),
+        serde_json::Value::Bool(b) => Value::bool(*b),
         serde_json::Value::Number(n) => {
             n.as_i64().map_or_else(
-                || Value::Float(n.as_f64().unwrap_or(0.0)),
-                Value::Int,
+                || Value::float(n.as_f64().unwrap_or(0.0)),
+                Value::int,
             )
         }
-        serde_json::Value::String(s) => Value::String(Rc::from(s.as_str())),
+        serde_json::Value::String(s) => Value::string_from(s.as_str()),
         serde_json::Value::Array(arr) => {
             let items: Vec<Value> = arr.iter().map(json_to_value).collect();
             new_list(items)
@@ -64,33 +64,33 @@ fn json_to_value(json: &serde_json::Value) -> Value {
 }
 
 fn value_to_json(val: &Value) -> Result<serde_json::Value, String> {
-    match val {
-        Value::Int(n) => Ok(serde_json::Value::Number((*n).into())),
-        Value::Float(n) => serde_json::Number::from_f64(*n)
+    match val.kind() {
+        VK::Int(n) => Ok(serde_json::Value::Number(n.into())),
+        VK::Float(n) => serde_json::Number::from_f64(n)
             .map(serde_json::Value::Number)
             .ok_or_else(|| "Cannot convert float to JSON".to_string()),
-        Value::String(s) => Ok(serde_json::Value::String(s.to_string())),
-        Value::Bool(b) => Ok(serde_json::Value::Bool(*b)),
-        Value::Void => Ok(serde_json::Value::Null),
-        Value::List(items) => {
+        VK::String(s) => Ok(serde_json::Value::String(s.to_string())),
+        VK::Bool(b) => Ok(serde_json::Value::Bool(b)),
+        VK::Void => Ok(serde_json::Value::Null),
+        VK::List(items) => {
             let arr: Result<Vec<_>, _> = items.borrow().iter().map(value_to_json).collect();
             Ok(serde_json::Value::Array(arr?))
         }
-        Value::Object(rc) => {
+        VK::Object(rc) => {
             let mut obj = serde_json::Map::new();
             for (k, v) in rc.borrow().fields.iter() {
                 obj.insert(k.clone(), value_to_json(v)?);
             }
             Ok(serde_json::Value::Object(obj))
         }
-        other => Err(format!("Cannot convert {} to JSON", other.type_name())),
+        _ => Err(format!("Cannot convert {} to JSON", val.type_name())),
     }
 }
 
 // === TOML ===
 
 fn builtin_from_toml(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
     let toml_val: toml::Value = s.parse()
         .map_err(|e| format!("from_toml(): {e}"))?;
     Ok(toml_to_value(&toml_val))
@@ -100,16 +100,16 @@ fn builtin_to_toml(args: &[Value]) -> Result<Value, String> {
     let toml_val = value_to_toml(&args[0])?;
     let s = toml::to_string_pretty(&toml_val)
         .map_err(|e| format!("to_toml(): {e}"))?;
-    Ok(Value::String(Rc::from(s)))
+    Ok(Value::string(Rc::from(s)))
 }
 
 fn toml_to_value(t: &toml::Value) -> Value {
     match t {
-        toml::Value::String(s) => Value::String(Rc::from(s.as_str())),
-        toml::Value::Integer(n) => Value::Int(*n),
-        toml::Value::Float(n) => Value::Float(*n),
-        toml::Value::Boolean(b) => Value::Bool(*b),
-        toml::Value::Datetime(dt) => Value::String(Rc::from(dt.to_string())),
+        toml::Value::String(s) => Value::string_from(s.as_str()),
+        toml::Value::Integer(n) => Value::int(*n),
+        toml::Value::Float(n) => Value::float(*n),
+        toml::Value::Boolean(b) => Value::bool(*b),
+        toml::Value::Datetime(dt) => Value::string_from(&dt.to_string()),
         toml::Value::Array(arr) => {
             let items: Vec<Value> = arr.iter().map(toml_to_value).collect();
             new_list(items)
@@ -125,30 +125,30 @@ fn toml_to_value(t: &toml::Value) -> Value {
 }
 
 fn value_to_toml(val: &Value) -> Result<toml::Value, String> {
-    match val {
-        Value::Int(n) => Ok(toml::Value::Integer(*n)),
-        Value::Float(n) => Ok(toml::Value::Float(*n)),
-        Value::String(s) => Ok(toml::Value::String(s.to_string())),
-        Value::Bool(b) => Ok(toml::Value::Boolean(*b)),
-        Value::List(items) => {
+    match val.kind() {
+        VK::Int(n) => Ok(toml::Value::Integer(n)),
+        VK::Float(n) => Ok(toml::Value::Float(n)),
+        VK::String(s) => Ok(toml::Value::String(s.to_string())),
+        VK::Bool(b) => Ok(toml::Value::Boolean(b)),
+        VK::List(items) => {
             let arr: Result<Vec<_>, _> = items.borrow().iter().map(value_to_toml).collect();
             Ok(toml::Value::Array(arr?))
         }
-        Value::Object(rc) => {
+        VK::Object(rc) => {
             let mut table = toml::map::Map::new();
             for (k, v) in rc.borrow().fields.iter() {
                 table.insert(k.clone(), value_to_toml(v)?);
             }
             Ok(toml::Value::Table(table))
         }
-        other => Err(format!("Cannot convert {} to TOML", other.type_name())),
+        _ => Err(format!("Cannot convert {} to TOML", val.type_name())),
     }
 }
 
 // === YAML ===
 
 fn builtin_from_yaml(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
     let yaml: serde_yaml::Value = serde_yaml::from_str(s)
         .map_err(|e| format!("from_yaml(): {e}"))?;
     Ok(yaml_to_value(&yaml))
@@ -158,20 +158,20 @@ fn builtin_to_yaml(args: &[Value]) -> Result<Value, String> {
     let yaml = value_to_yaml(&args[0])?;
     let s = serde_yaml::to_string(&yaml)
         .map_err(|e| format!("to_yaml(): {e}"))?;
-    Ok(Value::String(Rc::from(s)))
+    Ok(Value::string(Rc::from(s)))
 }
 
 fn yaml_to_value(y: &serde_yaml::Value) -> Value {
     match y {
-        serde_yaml::Value::Null => Value::Void,
-        serde_yaml::Value::Bool(b) => Value::Bool(*b),
+        serde_yaml::Value::Null => Value::void(),
+        serde_yaml::Value::Bool(b) => Value::bool(*b),
         serde_yaml::Value::Number(n) => {
             n.as_i64().map_or_else(
-                || Value::Float(n.as_f64().unwrap_or(0.0)),
-                Value::Int,
+                || Value::float(n.as_f64().unwrap_or(0.0)),
+                Value::int,
             )
         }
-        serde_yaml::Value::String(s) => Value::String(Rc::from(s.as_str())),
+        serde_yaml::Value::String(s) => Value::string_from(s.as_str()),
         serde_yaml::Value::Sequence(seq) => {
             let items: Vec<Value> = seq.iter().map(yaml_to_value).collect();
             new_list(items)
@@ -192,31 +192,31 @@ fn yaml_to_value(y: &serde_yaml::Value) -> Value {
 }
 
 fn value_to_yaml(val: &Value) -> Result<serde_yaml::Value, String> {
-    match val {
-        Value::Int(n) => Ok(serde_yaml::Value::Number((*n).into())),
-        Value::Float(n) => Ok(serde_yaml::Value::Number(serde_yaml::Number::from(*n))),
-        Value::String(s) => Ok(serde_yaml::Value::String(s.to_string())),
-        Value::Bool(b) => Ok(serde_yaml::Value::Bool(*b)),
-        Value::Void => Ok(serde_yaml::Value::Null),
-        Value::List(items) => {
+    match val.kind() {
+        VK::Int(n) => Ok(serde_yaml::Value::Number(n.into())),
+        VK::Float(n) => Ok(serde_yaml::Value::Number(serde_yaml::Number::from(n))),
+        VK::String(s) => Ok(serde_yaml::Value::String(s.to_string())),
+        VK::Bool(b) => Ok(serde_yaml::Value::Bool(b)),
+        VK::Void => Ok(serde_yaml::Value::Null),
+        VK::List(items) => {
             let seq: Result<Vec<_>, _> = items.borrow().iter().map(value_to_yaml).collect();
             Ok(serde_yaml::Value::Sequence(seq?))
         }
-        Value::Object(rc) => {
+        VK::Object(rc) => {
             let mut mapping = serde_yaml::Mapping::new();
             for (k, v) in rc.borrow().fields.iter() {
                 mapping.insert(serde_yaml::Value::String(k.clone()), value_to_yaml(v)?);
             }
             Ok(serde_yaml::Value::Mapping(mapping))
         }
-        other => Err(format!("Cannot convert {} to YAML", other.type_name())),
+        _ => Err(format!("Cannot convert {} to YAML", val.type_name())),
     }
 }
 
 // === CSV ===
 
 fn builtin_from_csv(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
     let mut lines = s.lines();
     let header: Vec<&str> = match lines.next() {
         Some(h) => h.split(',').map(str::trim).collect(),
@@ -229,7 +229,7 @@ fn builtin_from_csv(args: &[Value]) -> Result<Value, String> {
         let mut obj = IndexMap::new();
         for (i, key) in header.iter().enumerate() {
             let val = fields.get(i).copied().unwrap_or("");
-            obj.insert((*key).to_string(), Value::String(Rc::from(val)));
+            obj.insert((*key).to_string(), Value::string_from(val));
         }
         rows.push(new_object(obj));
     }
@@ -237,20 +237,21 @@ fn builtin_from_csv(args: &[Value]) -> Result<Value, String> {
 }
 
 fn builtin_to_csv(args: &[Value]) -> Result<Value, String> {
-    let Value::List(items) = &args[0] else { unreachable!() };
-    let items = items.borrow();
+    let Some(items_ref) = args[0].as_list_ref() else { unreachable!() };
+    let items = items_ref.borrow();
     if items.is_empty() {
-        return Ok(Value::String(Rc::from("")));
+        return Ok(Value::string_from(""));
     }
     // Get headers from first object
-    let headers: Vec<String> = match &items[0] {
-        Value::Object(rc) => rc.borrow().fields.keys().cloned().collect(),
-        _ => return Err("to_csv() expects list of objects".to_string()),
+    let headers: Vec<String> = if let Some(rc) = items[0].as_object_ref() {
+        rc.borrow().fields.keys().cloned().collect()
+    } else {
+        return Err("to_csv() expects list of objects".to_string());
     };
     let mut result = headers.join(",");
     result.push('\n');
     for item in items.iter() {
-        if let Value::Object(rc) = item {
+        if let Some(rc) = item.as_object_ref() {
             let map = rc.borrow();
             let row: Vec<String> = headers.iter()
                 .map(|h| map.fields.get(h).map(ToString::to_string).unwrap_or_default())
@@ -259,21 +260,21 @@ fn builtin_to_csv(args: &[Value]) -> Result<Value, String> {
             result.push('\n');
         }
     }
-    Ok(Value::String(Rc::from(result)))
+    Ok(Value::string(Rc::from(result)))
 }
 
 // === Base64 ===
 
 fn builtin_to_base64(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
-    Ok(Value::String(Rc::from(base64_encode(s.as_bytes()))))
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    Ok(Value::string_from(&base64_encode(s.as_bytes())))
 }
 
 fn builtin_from_base64(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
     let bytes = base64_decode(s)?;
     String::from_utf8(bytes)
-        .map(|s| Value::String(Rc::from(s)))
+        .map(|s| Value::string_from(&s))
         .map_err(|e| format!("from_base64(): invalid UTF-8: {e}"))
 }
 
@@ -325,14 +326,14 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
 
 fn builtin_to_hex(args: &[Value]) -> Result<Value, String> {
     use std::fmt::Write;
-    let Value::String(s) = &args[0] else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
     let mut hex = String::with_capacity(s.len() * 2);
     for b in s.bytes() { let _ = write!(hex, "{b:02x}"); }
-    Ok(Value::String(Rc::from(hex)))
+    Ok(Value::string_from(&hex))
 }
 
 fn builtin_from_hex(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
     let mut bytes = Vec::new();
     let chars: Vec<char> = s.chars().collect();
     for pair in chars.chunks(2) {
@@ -344,14 +345,14 @@ fn builtin_from_hex(args: &[Value]) -> Result<Value, String> {
         bytes.push(byte);
     }
     String::from_utf8(bytes)
-        .map(|s| Value::String(Rc::from(s)))
+        .map(|s| Value::string_from(&s))
         .map_err(|e| format!("from_hex(): invalid UTF-8: {e}"))
 }
 
 // === URL Encoding ===
 
 fn builtin_url_encode(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
     let mut result = String::new();
     for b in s.bytes() {
         match b {
@@ -366,11 +367,11 @@ fn builtin_url_encode(args: &[Value]) -> Result<Value, String> {
             }
         }
     }
-    Ok(Value::String(Rc::from(result)))
+    Ok(Value::string_from(&result))
 }
 
 fn builtin_url_decode(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
     let mut result = Vec::new();
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -390,6 +391,6 @@ fn builtin_url_decode(args: &[Value]) -> Result<Value, String> {
         }
     }
     String::from_utf8(result)
-        .map(|s| Value::String(Rc::from(s)))
+        .map(|s| Value::string_from(&s))
         .map_err(|e| format!("url_decode(): invalid UTF-8: {e}"))
 }

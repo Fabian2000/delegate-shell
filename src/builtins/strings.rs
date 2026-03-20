@@ -1,116 +1,117 @@
 use std::rc::Rc;
-use crate::interpreter::value::{Value, new_list};
+use crate::interpreter::value::{Value, ValueKind as VK, new_list};
 use super::registry::{BuiltinRegistry, Param, Type};
 
 fn replace(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
-    let Value::String(old) = &args[1] else { unreachable!() };
-    let Value::String(new) = &args[2] else { unreachable!() };
-    Ok(Value::String(Rc::from(s.replace(&**old, new))))
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(old) = args[1].as_str_ref() else { unreachable!() };
+    let Some(new) = args[2].as_str_ref() else { unreachable!() };
+    Ok(Value::string_from(&s.replace(old, new)))
 }
 
 fn contains(args: &[Value]) -> Result<Value, String> {
-    match (&args[0], &args[1]) {
-        (Value::String(s), Value::String(sub)) => {
-            Ok(Value::Bool(s.contains(&**sub)))
+    match (args[0].kind(), args[1].kind()) {
+        (VK::String(s), VK::String(sub)) => {
+            Ok(Value::bool(s.contains(sub)))
         }
-        (Value::List(list), val) => {
+        (VK::List(list), _) => {
             let list = list.borrow();
+            let val = &args[1];
             let found = list.iter().any(|item| {
-                match (item, val) {
-                    (Value::Int(a), Value::Int(b)) => a == b,
-                    (Value::String(a), Value::String(b)) => a == b,
-                    (Value::Bool(a), Value::Bool(b)) => a == b,
-                    (Value::Float(a), Value::Float(b)) => (a - b).abs() < f64::EPSILON,
+                match (item.kind(), val.kind()) {
+                    (VK::Int(a), VK::Int(b)) => a == b,
+                    (VK::String(a), VK::String(b)) => a == b,
+                    (VK::Bool(a), VK::Bool(b)) => a == b,
+                    (VK::Float(a), VK::Float(b)) => (a - b).abs() < f64::EPSILON,
                     _ => false,
                 }
             });
-            Ok(Value::Bool(found))
+            Ok(Value::bool(found))
         }
         _ => Err("contains() expects (string, string) or (list, value)".to_string()),
     }
 }
 
 fn substr(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
-    let Value::Int(start) = &args[1] else { unreachable!() };
-    let Value::Int(len) = &args[2] else { unreachable!() };
-    let start = usize::try_from(*start).map_err(|_| format!("Invalid start index: {start}"))?;
-    let len = usize::try_from(*len).map_err(|_| format!("Invalid length: {len}"))?;
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(start) = args[1].as_int() else { unreachable!() };
+    let Some(len) = args[2].as_int() else { unreachable!() };
+    let start = usize::try_from(start).map_err(|_| format!("Invalid start index: {start}"))?;
+    let len = usize::try_from(len).map_err(|_| format!("Invalid length: {len}"))?;
     let result: String = s.chars().skip(start).take(len).collect();
-    Ok(Value::String(Rc::from(result)))
+    Ok(Value::string(Rc::from(result)))
 }
 
 fn index_of(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
-    let Value::String(sub) = &args[1] else { unreachable!() };
-    s.find(&**sub).map_or_else(|| Ok(Value::Int(-1)), |pos| {
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(sub) = args[1].as_str_ref() else { unreachable!() };
+    s.find(sub).map_or_else(|| Ok(Value::int(-1)), |pos| {
         let char_pos = s[..pos].chars().count();
-        Ok(Value::Int(i64::try_from(char_pos).unwrap_or(i64::MAX)))
+        Ok(Value::int(i64::try_from(char_pos).unwrap_or(i64::MAX)))
     })
 }
 
 fn pad_left(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
-    let Value::Int(width) = &args[1] else { unreachable!() };
-    let Value::String(pad) = &args[2] else { unreachable!() };
-    let width = usize::try_from(*width).map_err(|_| format!("Invalid width: {width}"))?;
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(width) = args[1].as_int() else { unreachable!() };
+    let Some(pad) = args[2].as_str_ref() else { unreachable!() };
+    let width = usize::try_from(width).map_err(|_| format!("Invalid width: {width}"))?;
     let pad_char = pad.chars().next().unwrap_or(' ');
     let current_len = s.chars().count();
     if current_len >= width {
-        Ok(Value::String(s.clone()))
+        Ok(Value::string_from(s))
     } else {
         let padding: String = std::iter::repeat_n(pad_char, width - current_len).collect();
-        Ok(Value::String(Rc::from(format!("{padding}{s}"))))
+        Ok(Value::string_from(&format!("{padding}{s}")))
     }
 }
 
 fn pad_right(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
-    let Value::Int(width) = &args[1] else { unreachable!() };
-    let Value::String(pad) = &args[2] else { unreachable!() };
-    let width = usize::try_from(*width).map_err(|_| format!("Invalid width: {width}"))?;
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(width) = args[1].as_int() else { unreachable!() };
+    let Some(pad) = args[2].as_str_ref() else { unreachable!() };
+    let width = usize::try_from(width).map_err(|_| format!("Invalid width: {width}"))?;
     let pad_char = pad.chars().next().unwrap_or(' ');
     let current_len = s.chars().count();
     if current_len >= width {
-        Ok(Value::String(s.clone()))
+        Ok(Value::string_from(s))
     } else {
         let padding: String = std::iter::repeat_n(pad_char, width - current_len).collect();
-        Ok(Value::String(Rc::from(format!("{s}{padding}"))))
+        Ok(Value::string_from(&format!("{s}{padding}")))
     }
 }
 
 fn repeat(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
-    let Value::Int(n) = &args[1] else { unreachable!() };
-    let n = usize::try_from(*n).map_err(|_| format!("Invalid repeat count: {n}"))?;
-    Ok(Value::String(Rc::from(s.repeat(n))))
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(n) = args[1].as_int() else { unreachable!() };
+    let n = usize::try_from(n).map_err(|_| format!("Invalid repeat count: {n}"))?;
+    Ok(Value::string_from(&s.repeat(n)))
 }
 
 fn reverse(args: &[Value]) -> Result<Value, String> {
-    match &args[0] {
-        Value::String(s) => {
+    match args[0].kind() {
+        VK::String(s) => {
             let rev: String = s.chars().rev().collect();
-            Ok(Value::String(Rc::from(rev)))
+            Ok(Value::string_from(&rev))
         }
-        Value::List(list) => {
+        VK::List(list) => {
             let mut items = list.borrow().clone();
             items.reverse();
             Ok(new_list(items))
         }
-        other => Err(format!("Cannot reverse {}", other.type_name())),
+        _ => Err(format!("Cannot reverse {}", args[0].type_name())),
     }
 }
 
 fn match_regex(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
-    let Value::String(pattern) = &args[1] else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(pattern) = args[1].as_str_ref() else { unreachable!() };
     let re = regex::Regex::new(pattern)
         .map_err(|e| format!("Invalid regex '{pattern}': {e}"))?;
-    re.captures(s).map_or_else(|| Ok(Value::Bool(false)), |caps| {
+    re.captures(s).map_or_else(|| Ok(Value::bool(false)), |caps| {
         let mut groups: Vec<Value> = Vec::new();
         for i in 0..caps.len() {
-            let m = caps.get(i).map_or(Value::Void, |m| Value::String(Rc::from(m.as_str())));
+            let m = caps.get(i).map_or_else(Value::void, |m| Value::string_from(m.as_str()));
             groups.push(m);
         }
         Ok(new_list(groups))
@@ -118,45 +119,45 @@ fn match_regex(args: &[Value]) -> Result<Value, String> {
 }
 
 fn match_all(args: &[Value]) -> Result<Value, String> {
-    let Value::String(s) = &args[0] else { unreachable!() };
-    let Value::String(pattern) = &args[1] else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(pattern) = args[1].as_str_ref() else { unreachable!() };
     let re = regex::Regex::new(pattern)
         .map_err(|e| format!("Invalid regex '{pattern}': {e}"))?;
     let matches: Vec<Value> = re.find_iter(s)
-        .map(|m| Value::String(Rc::from(m.as_str())))
+        .map(|m| Value::string_from(m.as_str()))
         .collect();
     Ok(new_list(matches))
 }
 
 pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     reg.add("split", &[Param::Required(Type::String), Param::Required(Type::String)], Type::List, |args| {
-        let Value::String(s) = &args[0] else { unreachable!() };
-        let Value::String(delim) = &args[1] else { unreachable!() };
-        let parts: Vec<Value> = s.split(&**delim).map(|p| Value::String(Rc::from(p))).collect();
+        let Some(s) = args[0].as_str_ref() else { unreachable!() };
+        let Some(delim) = args[1].as_str_ref() else { unreachable!() };
+        let parts: Vec<Value> = s.split(delim).map(|p| Value::string_from(p)).collect();
         Ok(new_list(parts))
     })?;
 
     reg.add("join", &[Param::Required(Type::List), Param::Required(Type::String)], Type::String, |args| {
-        let Value::List(items) = &args[0] else { unreachable!() };
-        let Value::String(delim) = &args[1] else { unreachable!() };
+        let Some(items) = args[0].as_list_ref() else { unreachable!() };
+        let Some(delim) = args[1].as_str_ref() else { unreachable!() };
         let items = items.borrow();
         let parts: Vec<String> = items.iter().map(ToString::to_string).collect();
-        Ok(Value::String(Rc::from(parts.join(&**delim))))
+        Ok(Value::string_from(&parts.join(delim)))
     })?;
 
     reg.add("trim", &[Param::Required(Type::String)], Type::String, |args| {
-        let Value::String(s) = &args[0] else { unreachable!() };
-        Ok(Value::String(Rc::from(s.trim())))
+        let Some(s) = args[0].as_str_ref() else { unreachable!() };
+        Ok(Value::string_from(s.trim()))
     })?;
 
     reg.add("upper", &[Param::Required(Type::String)], Type::String, |args| {
-        let Value::String(s) = &args[0] else { unreachable!() };
-        Ok(Value::String(Rc::from(s.to_uppercase())))
+        let Some(s) = args[0].as_str_ref() else { unreachable!() };
+        Ok(Value::string_from(&s.to_uppercase()))
     })?;
 
     reg.add("lower", &[Param::Required(Type::String)], Type::String, |args| {
-        let Value::String(s) = &args[0] else { unreachable!() };
-        Ok(Value::String(Rc::from(s.to_lowercase())))
+        let Some(s) = args[0].as_str_ref() else { unreachable!() };
+        Ok(Value::string_from(&s.to_lowercase()))
     })?;
 
     reg.add("replace", &[Param::Required(Type::String), Param::Required(Type::String), Param::Required(Type::String)], Type::String, replace)?;
@@ -164,15 +165,15 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     reg.add("contains", &[Param::Required(Type::Dyn), Param::Required(Type::Dyn)], Type::Bool, contains)?;
 
     reg.add("starts_with", &[Param::Required(Type::String), Param::Required(Type::String)], Type::Bool, |args| {
-        let Value::String(s) = &args[0] else { unreachable!() };
-        let Value::String(prefix) = &args[1] else { unreachable!() };
-        Ok(Value::Bool(s.starts_with(&**prefix)))
+        let Some(s) = args[0].as_str_ref() else { unreachable!() };
+        let Some(prefix) = args[1].as_str_ref() else { unreachable!() };
+        Ok(Value::bool(s.starts_with(prefix)))
     })?;
 
     reg.add("ends_with", &[Param::Required(Type::String), Param::Required(Type::String)], Type::Bool, |args| {
-        let Value::String(s) = &args[0] else { unreachable!() };
-        let Value::String(suffix) = &args[1] else { unreachable!() };
-        Ok(Value::Bool(s.ends_with(&**suffix)))
+        let Some(s) = args[0].as_str_ref() else { unreachable!() };
+        let Some(suffix) = args[1].as_str_ref() else { unreachable!() };
+        Ok(Value::bool(s.ends_with(suffix)))
     })?;
 
     reg.add("substr", &[Param::Required(Type::String), Param::Required(Type::Int), Param::Required(Type::Int)], Type::String, substr)?;
@@ -183,8 +184,8 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     reg.add("reverse", &[Param::Required(Type::Dyn)], Type::Dyn, reverse)?;
 
     reg.add("chars", &[Param::Required(Type::String)], Type::List, |args| {
-        let Value::String(s) = &args[0] else { unreachable!() };
-        let chars: Vec<Value> = s.chars().map(|c| Value::String(Rc::from(c.to_string()))).collect();
+        let Some(s) = args[0].as_str_ref() else { unreachable!() };
+        let chars: Vec<Value> = s.chars().map(|c| Value::string_from(&c.to_string())).collect();
         Ok(new_list(chars))
     })?;
 
