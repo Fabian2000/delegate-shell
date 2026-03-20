@@ -1,5 +1,25 @@
 use crate::lexer::token::Span;
 
+/// A type annotation on a declaration.
+/// Annotations go on the LEFT side (the declaration), never on the right (the value).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeAnnotation {
+    /// A simple type name, e.g. `int`, `string`, `bool`, etc.
+    Simple(String),
+    /// An object shape annotation, e.g. `{ name: string, age: int }`.
+    /// Each entry is (field_name, type_name).
+    Object(Vec<(String, String)>),
+}
+
+impl TypeAnnotation {
+    pub fn type_name(&self) -> &str {
+        match self {
+            Self::Simple(s) => s,
+            Self::Object(_) => "object",
+        }
+    }
+}
+
 /// How a function call should be resolved
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolution {
@@ -135,6 +155,24 @@ pub enum ExprKind {
         name: String,
         field: String,
     },
+
+    /// Optional param check: <param> — returns true if the optional param was provided
+    OptionalCheck(String),
+
+    /// `atomic <expr>` — wrap a value in an AtomicValue
+    Atomic(Box<Expr>),
+
+    /// Post-increment/decrement: i++, i-- — increments/decrements, returns the OLD value
+    PostIncDec {
+        name: String,
+        increment: bool, // true = ++, false = --
+    },
+
+    /// Pre-increment/decrement: ++i, --i — increments/decrements, returns the NEW value
+    PreIncDec {
+        name: String,
+        increment: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,10 +183,14 @@ pub struct Stmt {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtKind {
-    /// x = expr or x? = expr
+    /// x = expr or x? = expr, with optional type annotation: x: type = expr
     Assign {
         name: String,
         error_tolerant: bool,
+        /// Optional type annotation on the variable declaration
+        type_ann: Option<TypeAnnotation>,
+        /// `dyn x = expr` — allows reassignment with different types
+        is_dyn: bool,
         expr: Expr,
     },
 
@@ -191,7 +233,12 @@ pub enum StmtKind {
     /// Function definition
     FnDef {
         name: String,
-        params: Vec<String>,
+        /// Required parameters: (name, type_annotation, is_dyn)
+        params: Vec<(String, Option<TypeAnnotation>, bool)>,
+        /// Optional parameters: (name, type_annotation, is_dyn)
+        optional_params: Vec<(String, Option<TypeAnnotation>, bool)>,
+        /// Optional return type annotation
+        return_type_ann: Option<TypeAnnotation>,
         body: Vec<Stmt>,
     },
 
@@ -215,8 +262,11 @@ pub enum StmtKind {
         body: Vec<Stmt>,
     },
 
-    /// return expr
-    Return(Option<Expr>),
+    /// return expr / dyn return expr
+    Return {
+        expr: Option<Expr>,
+        is_dyn: bool,
+    },
 
     /// continue — skip to next loop iteration
     Continue,
@@ -250,11 +300,17 @@ pub enum StmtKind {
         expr: Expr,
         arms: Vec<MatchArm>,
     },
+
+    /// alias name = "target" — maps a call name to an executable string
+    Alias {
+        name: String,
+        target: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
-    /// None = wildcard (_)
+    /// None = catch-all (`default`)
     pub pattern: Option<Expr>,
     pub body: Vec<Stmt>,
 }

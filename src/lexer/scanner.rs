@@ -243,10 +243,14 @@ impl Lexer {
             "throw" => Token::Throw,
             "enum" => Token::Enum,
             "match" => Token::Match,
+            "default" => Token::Default,
             "continue" => Token::Continue,
             "break" => Token::Break,
             "true" => Token::Bool(true),
             "false" => Token::Bool(false),
+            "atomic" => Token::Atomic,
+            "dyn" => Token::Dyn,
+            "alias" => Token::Alias,
             _ => Token::Ident(lower),
         };
 
@@ -488,7 +492,9 @@ impl Lexer {
 
     fn scan_operator(&mut self) -> SpannedToken {
         let start = self.pos;
-        let c = self.advance().unwrap();
+        let Some(c) = self.advance() else {
+            return SpannedToken { token: Token::Eof, span: Span { start, end: start } };
+        };
 
         let token = match c {
             '+' | '-' | '*' | '/' | '%' => self.scan_arithmetic_op(c),

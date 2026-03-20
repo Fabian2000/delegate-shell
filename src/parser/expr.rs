@@ -111,6 +111,22 @@ impl<'a> ExprParser<'a> {
     fn try_parse_postfix(&mut self, lhs: &mut Expr) -> Result<PostfixResult, String> {
         match self.peek() {
             Token::LParen => Ok(PostfixResult::Break),
+            Token::Increment | Token::Decrement => {
+                // Post-increment/decrement: ident++ or ident--
+                if let ExprKind::Ident(name) = &lhs.kind {
+                    let name = name.clone();
+                    let increment = *self.peek() == Token::Increment;
+                    let span_end = self.peek_span().end;
+                    self.advance();
+                    *lhs = Expr {
+                        kind: ExprKind::PostIncDec { name, increment },
+                        span: Span { start: lhs.span.start, end: span_end },
+                    };
+                    Ok(PostfixResult::Continue)
+                } else {
+                    Ok(PostfixResult::Break)
+                }
+            }
             Token::Question => {
                 if let ExprKind::Ident(name) = &lhs.kind {
                     let name = name.clone();
@@ -224,6 +240,23 @@ impl<'a> ExprParser<'a> {
                 self.parse_prefix(&tok, span)
             }
 
+            // Pre-increment/decrement: ++ident or --ident
+            Token::Increment | Token::Decrement => {
+                let increment = tok == Token::Increment;
+                self.advance(); // consume ++ or --
+                if let Token::Ident(name) = self.peek().clone() {
+                    let name_span_end = self.peek_span().end;
+                    self.advance(); // consume ident
+                    Ok(Expr {
+                        kind: ExprKind::PreIncDec { name, increment },
+                        span: Span { start: span.start, end: name_span_end },
+                    })
+                } else {
+                    Err(format!("Expected identifier after {}, got {:?}",
+                        if increment { "++" } else { "--" }, self.peek()))
+                }
+            }
+
             Token::Int(v) => {
                 self.advance();
                 Ok(Expr { kind: ExprKind::Int(v), span })
@@ -271,13 +304,51 @@ impl<'a> ExprParser<'a> {
             Token::At => self.parse_lambda(span),
             Token::Ident(name) => self.parse_ident_or_call(name, span),
 
+            // Optional param check: <ident> — check if optional param was provided
+            Token::Lt => self.parse_optional_check(span),
+
+            // atomic keyword: `atomic <expr>`
+            Token::Atomic => {
+                self.advance();
+                let inner = self.parse_expr(0)?;
+                let end = inner.span.end;
+                Ok(Expr {
+                    kind: ExprKind::Atomic(Box::new(inner)),
+                    span: Span { start: span.start, end },
+                })
+            }
+
             _ => Err(format!("Unexpected token: {tok:?}")),
         }
     }
 
+    fn parse_optional_check(&mut self, span: Span) -> Result<Expr, String> {
+        // We've already peeked Token::Lt. Try to match <ident> pattern.
+        // Save position in case this is not <ident> (e.g. a bare '<' that shouldn't be here).
+        let saved_pos = self.pos;
+        self.advance(); // consume '<'
+
+        if let Token::Ident(name) = self.peek().clone() {
+            self.advance(); // consume ident
+            if *self.peek() == Token::Gt {
+                let end = self.peek_span().end;
+                self.advance(); // consume '>'
+                return Ok(Expr {
+                    kind: ExprKind::OptionalCheck(name),
+                    span: Span { start: span.start, end },
+                });
+            }
+        }
+
+        // Not <ident> — restore position and report error
+        self.pos = saved_pos;
+        Err(format!("Unexpected token: {:?}", Token::Lt))
+    }
+
     fn parse_prefix(&mut self, tok: &Token, span: Span) -> Result<Expr, String> {
         self.advance();
-        let ((), r_bp) = prefix_binding_power(tok).unwrap();
+        let ((), r_bp) = prefix_binding_power(tok)
+            .ok_or_else(|| format!("Unexpected prefix operator: {tok:?}"))?;
         let expr = self.parse_expr(r_bp)?;
         let op = match tok {
             Token::Bang => UnaryOp::Not,

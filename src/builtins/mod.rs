@@ -1,3 +1,4 @@
+pub mod registry;
 mod io;
 mod types;
 mod collections;
@@ -15,5 +16,4 @@ mod terminal;
 mod process;
 mod dispatch;
 
-pub use dispatch::call_builtin;
-pub use dispatch::expect_args;
+pub use registry::BuiltinRegistry;

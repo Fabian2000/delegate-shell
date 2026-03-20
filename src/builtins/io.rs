@@ -1,28 +1,29 @@
 use std::io::Write;
 use crate::interpreter::value::Value;
+use super::registry::{BuiltinRegistry, Param, Type};
 
-pub fn builtin_print(args: &[Value]) -> Value {
-    let parts: Vec<String> = args.iter().map(ToString::to_string).collect();
-    print!("{}", parts.join(" "));
-    let _ = std::io::stdout().flush();
-    Value::Void
-}
+pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
+    reg.add("print", &[Param::Required(Type::String)], Type::Void, |args| {
+        print!("{}", args[0]);
+        let _ = std::io::stdout().flush();
+        Ok(Value::Void)
+    })?;
 
-pub fn builtin_println(args: &[Value]) -> Value {
-    let parts: Vec<String> = args.iter().map(ToString::to_string).collect();
-    println!("{}", parts.join(" "));
-    Value::Void
-}
+    reg.add("println", &[Param::Required(Type::String)], Type::Void, |args| {
+        println!("{}", args[0]);
+        Ok(Value::Void)
+    })?;
 
-pub fn builtin_errprint(args: &[Value]) -> Value {
-    let parts: Vec<String> = args.iter().map(ToString::to_string).collect();
-    eprint!("{}", parts.join(" "));
-    let _ = std::io::stderr().flush();
-    Value::Void
-}
+    reg.add("errprint", &[Param::Required(Type::String)], Type::Void, |args| {
+        eprint!("{}", args[0]);
+        let _ = std::io::stderr().flush();
+        Ok(Value::Void)
+    })?;
 
-pub fn builtin_errprintln(args: &[Value]) -> Value {
-    let parts: Vec<String> = args.iter().map(ToString::to_string).collect();
-    eprintln!("{}", parts.join(" "));
-    Value::Void
+    reg.add("errprintln", &[Param::Required(Type::String)], Type::Void, |args| {
+        eprintln!("{}", args[0]);
+        Ok(Value::Void)
+    })?;
+
+    Ok(())
 }

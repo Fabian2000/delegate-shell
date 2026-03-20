@@ -41,10 +41,14 @@ pub enum Token {
     Throw,
     Enum,
     Match,
+    Default,
     Continue,
     Break,
     True,
     False,
+    Atomic,
+    Alias,
+    Dyn,
     Not, // used contextually — parser handles !expr vs fn!()
 
     // Arithmetic

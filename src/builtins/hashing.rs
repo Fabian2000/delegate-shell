@@ -1,39 +1,36 @@
 use std::rc::Rc;
 use crate::interpreter::value::Value;
-use super::expect_args;
+use super::registry::{BuiltinRegistry, Param, Type};
 
-pub fn builtin_md5(args: &[Value]) -> Result<Value, String> {
-    expect_args("md5", args, 1)?;
-    let s = expect_str("md5", &args[0])?;
+fn md5(args: &[Value]) -> Result<Value, String> {
+    let Value::String(s) = &args[0] else { unreachable!() };
     let result = md5_compute(s.as_bytes());
     Ok(Value::String(Rc::from(bytes_to_hex(&result))))
 }
 
-pub fn builtin_sha256(args: &[Value]) -> Result<Value, String> {
-    expect_args("sha256", args, 1)?;
-    let s = expect_str("sha256", &args[0])?;
+fn sha256(args: &[Value]) -> Result<Value, String> {
+    let Value::String(s) = &args[0] else { unreachable!() };
     let result = sha256_compute(s.as_bytes());
     Ok(Value::String(Rc::from(bytes_to_hex(&result))))
 }
 
-pub fn builtin_sha512(args: &[Value]) -> Result<Value, String> {
-    expect_args("sha512", args, 1)?;
-    let s = expect_str("sha512", &args[0])?;
+fn sha512(args: &[Value]) -> Result<Value, String> {
+    let Value::String(s) = &args[0] else { unreachable!() };
     let result = sha512_compute(s.as_bytes());
     Ok(Value::String(Rc::from(bytes_to_hex(&result))))
 }
 
-pub fn builtin_uuid(_args: &[Value]) -> Value {
+fn uuid(_args: &[Value]) -> Result<Value, String> {
     let bytes = random_bytes_16();
     // UUID v4 format
-    Value::String(Rc::from(format!(
+    Ok(Value::String(Rc::from(format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
         bytes[0], bytes[1], bytes[2], bytes[3],
         bytes[4], bytes[5],
         bytes[6] & 0x0F, bytes[7],
         (bytes[8] & 0x3F) | 0x80, bytes[9],
         bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
-    )))
+    ))))
 }
 
 // --- Helpers ---
@@ -45,25 +42,20 @@ fn bytes_to_hex(data: &[u8]) -> String {
     hex
 }
 
-fn expect_str<'a>(name: &str, val: &'a Value) -> Result<&'a str, String> {
-    if let Value::String(s) = val { Ok(&**s) }
-    else { Err(format!("{name}() expects string, got {}", val.type_name())) }
-}
-
 fn random_bytes_16() -> [u8; 16] {
     let mut bytes = [0u8; 16];
-    #[expect(clippy::cast_possible_truncation)]
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
+    let seed = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ).unwrap_or(0);
     let mut state = seed;
     for byte in &mut bytes {
         state ^= state << 13;
         state ^= state >> 7;
         state ^= state << 17;
-        #[expect(clippy::cast_possible_truncation)]
-        { *byte = state as u8; }
+        *byte = state as u8;
     }
     bytes
 }
@@ -223,4 +215,13 @@ fn sha512_compute(msg: &[u8]) -> [u8; 64] {
     let mut result = [0u8; 64];
     for (idx, val) in hash.iter().enumerate() { result[idx*8..(idx+1)*8].copy_from_slice(&val.to_be_bytes()); }
     result
+}
+
+pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
+    reg.add("md5", &[Param::Required(Type::String)], Type::String, md5)?;
+    reg.add("sha256", &[Param::Required(Type::String)], Type::String, sha256)?;
+    reg.add("sha512", &[Param::Required(Type::String)], Type::String, sha512)?;
+    reg.add("uuid", &[], Type::String, uuid)?;
+
+    Ok(())
 }

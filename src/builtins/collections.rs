@@ -1,206 +1,178 @@
 use crate::interpreter::value::{Value, new_list, new_object};
 use crate::interpreter::Interpreter;
-use super::expect_args;
+use super::registry::{BuiltinRegistry, Param, Type};
 
-pub fn builtin_len(args: &[Value]) -> Result<Value, String> {
-    expect_args("len", args, 1)?;
-    match &args[0] {
-        Value::List(l) => {
-            let len = i64::try_from(l.borrow().len()).map_err(|_| "List length overflows i64".to_string())?;
-            Ok(Value::Int(len))
+pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
+    // Pure functions
+    reg.add("len", &[Param::Required(Type::Dyn)], Type::Int, |args| {
+        match &args[0] {
+            Value::List(l) => {
+                let len = i64::try_from(l.borrow().len()).map_err(|_| "List length overflows i64".to_string())?;
+                Ok(Value::Int(len))
+            }
+            Value::String(s) => {
+                let len = i64::try_from(s.len()).map_err(|_| "String length overflows i64".to_string())?;
+                Ok(Value::Int(len))
+            }
+            Value::Object(m) => {
+                let len = i64::try_from(m.borrow().fields.len()).map_err(|_| "Object length overflows i64".to_string())?;
+                Ok(Value::Int(len))
+            }
+            other => Err(format!("Cannot get length of {}", other.type_name())),
         }
-        Value::String(s) => {
-            let len = i64::try_from(s.len()).map_err(|_| "String length overflows i64".to_string())?;
-            Ok(Value::Int(len))
-        }
-        Value::Object(m) => {
-            let len = i64::try_from(m.borrow().len()).map_err(|_| "Object length overflows i64".to_string())?;
-            Ok(Value::Int(len))
-        }
-        other => Err(format!("Cannot get length of {}", other.type_name())),
-    }
-}
+    })?;
 
-pub fn builtin_push(args: &[Value]) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("push() expects 2 args, got {}", args.len()));
-    }
-    if let Value::List(list) = &args[0] {
+    reg.add("push", &[Param::Required(Type::List), Param::Required(Type::Dyn)], Type::Void, |args| {
+        let Value::List(list) = &args[0] else { unreachable!() };
         list.borrow_mut().push(args[1].clone());
         Ok(Value::Void)
-    } else {
-        Err(format!("Cannot push to {}", args[0].type_name()))
-    }
-}
+    })?;
 
-pub fn builtin_pop(args: &[Value]) -> Result<Value, String> {
-    expect_args("pop", args, 1)?;
-    if let Value::List(list) = &args[0] {
+    reg.add("pop", &[Param::Required(Type::List)], Type::Dyn, |args| {
+        let Value::List(list) = &args[0] else { unreachable!() };
         let mut list = list.borrow_mut();
         if list.is_empty() {
             return Err("Cannot pop from empty list".to_string());
         }
-        let val = list.pop().unwrap_or(Value::Void);
-        Ok(val)
-    } else {
-        Err(format!("Cannot pop from {}", args[0].type_name()))
-    }
-}
+        Ok(list.pop().unwrap_or(Value::Void))
+    })?;
 
-pub fn builtin_has(args: &[Value]) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("has() expects 2 args, got {}", args.len()));
-    }
-    if let (Value::Object(map), Value::String(key)) = (&args[0], &args[1]) {
-        Ok(Value::Bool(map.borrow().contains_key(&**key)))
-    } else {
-        Err("has() expects (object, string)".to_string())
-    }
-}
+    reg.add("has", &[Param::Required(Type::Object), Param::Required(Type::String)], Type::Bool, |args| {
+        let Value::Object(map) = &args[0] else { unreachable!() };
+        let Value::String(key) = &args[1] else { unreachable!() };
+        Ok(Value::Bool(map.borrow().fields.contains_key(&**key)))
+    })?;
 
-// --- Functions that need the interpreter for lambda callbacks ---
+    reg.add("sort", &[Param::Required(Type::List)], Type::List, |args| {
+        let Value::List(l) = &args[0] else { unreachable!() };
+        let mut sorted = l.borrow().clone();
+        sorted.sort_by(compare_values);
+        Ok(new_list(sorted))
+    })?;
 
-pub fn builtin_map(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("map() expects 2 args, got {}", args.len()));
-    }
-    let items = expect_list("map", &args[0])?;
-    let lambda = &args[1];
-    let mut result = Vec::with_capacity(items.len());
-    for item in &items {
-        result.push(interp.call_lambda(lambda, vec![item.clone()])?);
-    }
-    Ok(new_list(result))
-}
-
-pub fn builtin_filter(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("filter() expects 2 args, got {}", args.len()));
-    }
-    let items = expect_list("filter", &args[0])?;
-    let lambda = &args[1];
-    let mut result = Vec::new();
-    for item in &items {
-        let val = interp.call_lambda(lambda, vec![item.clone()])?;
-        if val.is_truthy() {
-            result.push(item.clone());
+    reg.add("index", &[Param::Required(Type::List), Param::Required(Type::Dyn)], Type::Int, |args| {
+        let Value::List(l) = &args[0] else { unreachable!() };
+        let items = l.borrow().clone();
+        let needle = &args[1];
+        for (i, item) in items.iter().enumerate() {
+            if values_equal(item, needle) {
+                return Ok(Value::Int(i64::try_from(i).unwrap_or(i64::MAX)));
+            }
         }
-    }
-    Ok(new_list(result))
-}
+        Ok(Value::Int(-1))
+    })?;
 
-pub fn builtin_reduce(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
-    if args.len() != 3 {
-        return Err(format!("reduce() expects 3 args, got {}", args.len()));
-    }
-    let items = expect_list("reduce", &args[0])?;
-    let lambda = &args[1];
-    let mut acc = args[2].clone();
-    for item in &items {
-        acc = interp.call_lambda(lambda, vec![acc, item.clone()])?;
-    }
-    Ok(acc)
-}
-
-pub fn builtin_sort(args: &[Value]) -> Result<Value, String> {
-    expect_args("sort", args, 1)?;
-    let items = expect_list("sort", &args[0])?;
-    let mut sorted = items;
-    sorted.sort_by(compare_values);
-    Ok(new_list(sorted))
-}
-
-pub fn builtin_sort_by(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("sort_by() expects 2 args, got {}", args.len()));
-    }
-    let items = expect_list("sort_by", &args[0])?;
-    let lambda = &args[1];
-    // Pre-compute keys
-    let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(items.len());
-    for item in &items {
-        let key = interp.call_lambda(lambda, vec![item.clone()])?;
-        keyed.push((item.clone(), key));
-    }
-    keyed.sort_by(|a, b| compare_values(&a.1, &b.1));
-    let sorted: Vec<Value> = keyed.into_iter().map(|(item, _)| item).collect();
-    Ok(new_list(sorted))
-}
-
-pub fn builtin_find(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("find() expects 2 args, got {}", args.len()));
-    }
-    let items = expect_list("find", &args[0])?;
-    let lambda = &args[1];
-    for item in &items {
-        let val = interp.call_lambda(lambda, vec![item.clone()])?;
-        if val.is_truthy() {
-            return Ok(item.clone());
+    reg.add("flat", &[Param::Required(Type::List)], Type::List, |args| {
+        let Value::List(l) = &args[0] else { unreachable!() };
+        let items = l.borrow().clone();
+        let mut result = Vec::new();
+        for item in &items {
+            match item {
+                Value::List(inner) => result.extend(inner.borrow().iter().cloned()),
+                other => result.push(other.clone()),
+            }
         }
-    }
-    Err("find(): no element matches".to_string())
-}
+        Ok(new_list(result))
+    })?;
 
-pub fn builtin_index(args: &[Value]) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("index() expects 2 args, got {}", args.len()));
-    }
-    let items = expect_list("index", &args[0])?;
-    let needle = &args[1];
-    for (i, item) in items.iter().enumerate() {
-        if values_equal(item, needle) {
-            #[expect(clippy::cast_possible_wrap)]
-            return Ok(Value::Int(i as i64));
+    reg.add("unique", &[Param::Required(Type::List)], Type::List, |args| {
+        let Value::List(l) = &args[0] else { unreachable!() };
+        let items = l.borrow().clone();
+        let mut result: Vec<Value> = Vec::new();
+        for item in &items {
+            if !result.iter().any(|existing| values_equal(existing, item)) {
+                result.push(item.clone());
+            }
         }
-    }
-    Ok(Value::Int(-1))
-}
+        Ok(new_list(result))
+    })?;
 
-pub fn builtin_flat(args: &[Value]) -> Result<Value, String> {
-    expect_args("flat", args, 1)?;
-    let items = expect_list("flat", &args[0])?;
-    let mut result = Vec::new();
-    for item in &items {
-        match item {
-            Value::List(inner) => result.extend(inner.borrow().iter().cloned()),
-            other => result.push(other.clone()),
+    reg.add("zip", &[Param::Required(Type::List), Param::Required(Type::List)], Type::List, |args| {
+        let Value::List(la) = &args[0] else { unreachable!() };
+        let Value::List(lb) = &args[1] else { unreachable!() };
+        let a = la.borrow().clone();
+        let b = lb.borrow().clone();
+        let result: Vec<Value> = a.iter().zip(b.iter())
+            .map(|(x, y)| new_list(vec![x.clone(), y.clone()]))
+            .collect();
+        Ok(new_list(result))
+    })?;
+
+    reg.add("range", &[Param::Required(Type::Int), Param::Required(Type::Int), Param::Required(Type::Int)], Type::List, builtin_range)?;
+
+    reg.add("slice", &[Param::Required(Type::List), Param::Required(Type::Int), Param::Required(Type::Int)], Type::List, |args| {
+        let Value::List(l) = &args[0] else { unreachable!() };
+        let Value::Int(start) = &args[1] else { unreachable!() };
+        let Value::Int(end) = &args[2] else { unreachable!() };
+        let items = l.borrow().clone();
+        let start = *start;
+        let end = *end;
+        let start = usize::try_from(start).map_err(|_| "Invalid start".to_string())?;
+        let end = usize::try_from(end).map_err(|_| "Invalid end".to_string())?;
+        let end = end.min(items.len());
+        let start = start.min(end);
+        Ok(new_list(items[start..end].to_vec()))
+    })?;
+
+    reg.add("insert", &[Param::Required(Type::List), Param::Required(Type::Int), Param::Required(Type::Dyn)], Type::Void, |args| {
+        let Value::List(list) = &args[0] else { unreachable!() };
+        let Value::Int(i) = &args[1] else { unreachable!() };
+        let idx = usize::try_from(*i).map_err(|_| "Invalid index".to_string())?;
+        let mut list = list.borrow_mut();
+        if idx > list.len() {
+            return Err(format!("insert() index {idx} out of bounds (len {})", list.len()));
         }
-    }
-    Ok(new_list(result))
-}
+        list.insert(idx, args[2].clone());
+        Ok(Value::Void)
+    })?;
 
-pub fn builtin_unique(args: &[Value]) -> Result<Value, String> {
-    expect_args("unique", args, 1)?;
-    let items = expect_list("unique", &args[0])?;
-    let mut result: Vec<Value> = Vec::new();
-    for item in &items {
-        if !result.iter().any(|existing| values_equal(existing, item)) {
-            result.push(item.clone());
+    reg.add("remove", &[Param::Required(Type::List), Param::Required(Type::Int)], Type::Dyn, |args| {
+        let Value::List(list) = &args[0] else { unreachable!() };
+        let Value::Int(i) = &args[1] else { unreachable!() };
+        let idx = usize::try_from(*i).map_err(|_| "Invalid index".to_string())?;
+        let mut list = list.borrow_mut();
+        if idx >= list.len() {
+            return Err(format!("remove() index {idx} out of bounds (len {})", list.len()));
         }
-    }
-    Ok(new_list(result))
+        Ok(list.remove(idx))
+    })?;
+
+    reg.add("merge", &[Param::Required(Type::Object), Param::Required(Type::Object)], Type::Object, |args| {
+        let Value::Object(a) = &args[0] else { unreachable!() };
+        let Value::Object(b) = &args[1] else { unreachable!() };
+        let mut merged = a.borrow().fields.clone();
+        for (k, v) in b.borrow().fields.iter() {
+            merged.insert(k.clone(), v.clone());
+        }
+        Ok(new_object(merged))
+    })?;
+
+    reg.add("sum", &[Param::Required(Type::List)], Type::Number, builtin_sum)?;
+    reg.add("min", &[Param::Required(Type::List)], Type::Dyn, builtin_min)?;
+    reg.add("max", &[Param::Required(Type::List)], Type::Dyn, builtin_max)?;
+
+    // Interpreter-dependent functions
+    reg.add_interp("map", &[Param::Required(Type::List), Param::Required(Type::Lambda)], Type::List, builtin_map)?;
+    reg.add_interp("filter", &[Param::Required(Type::List), Param::Required(Type::Lambda)], Type::List, builtin_filter)?;
+    reg.add_interp("reduce", &[Param::Required(Type::List), Param::Required(Type::Lambda), Param::Required(Type::Dyn)], Type::Dyn, builtin_reduce)?;
+    reg.add_interp("sort_by", &[Param::Required(Type::List), Param::Required(Type::Lambda)], Type::List, builtin_sort_by)?;
+    reg.add_interp("find", &[Param::Required(Type::List), Param::Required(Type::Lambda)], Type::Dyn, builtin_find)?;
+    reg.add_interp("count", &[Param::Required(Type::List), Param::Required(Type::Lambda)], Type::Int, builtin_count)?;
+    reg.add_interp("any", &[Param::Required(Type::List), Param::Required(Type::Lambda)], Type::Bool, builtin_any)?;
+    reg.add_interp("all", &[Param::Required(Type::List), Param::Required(Type::Lambda)], Type::Bool, builtin_all)?;
+
+    Ok(())
 }
 
-pub fn builtin_zip(args: &[Value]) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("zip() expects 2 args, got {}", args.len()));
-    }
-    let a = expect_list("zip", &args[0])?;
-    let b = expect_list("zip", &args[1])?;
-    let result: Vec<Value> = a.iter().zip(b.iter())
-        .map(|(x, y)| new_list(vec![x.clone(), y.clone()]))
-        .collect();
-    Ok(new_list(result))
-}
+// --- Named pure functions (complex logic) ---
 
-pub fn builtin_range(args: &[Value]) -> Result<Value, String> {
-    if args.len() < 2 || args.len() > 3 {
-        return Err(format!("range() expects 2-3 args, got {}", args.len()));
-    }
-    let start = expect_int("range", &args[0])?;
-    let end = expect_int("range", &args[1])?;
-    let step = if args.len() == 3 { expect_int("range", &args[2])? } else { 1 };
+fn builtin_range(args: &[Value]) -> Result<Value, String> {
+    let Value::Int(start) = &args[0] else { unreachable!() };
+    let Value::Int(end) = &args[1] else { unreachable!() };
+    let Value::Int(step) = &args[2] else { unreachable!() };
+    let start = *start;
+    let end = *end;
+    let step = *step;
     if step == 0 {
         return Err("range() step cannot be 0".to_string());
     }
@@ -220,115 +192,9 @@ pub fn builtin_range(args: &[Value]) -> Result<Value, String> {
     Ok(new_list(items))
 }
 
-pub fn builtin_slice(args: &[Value]) -> Result<Value, String> {
-    if args.len() != 3 {
-        return Err(format!("slice() expects 3 args, got {}", args.len()));
-    }
-    let items = expect_list("slice", &args[0])?;
-    let start = usize::try_from(expect_int("slice", &args[1])?).map_err(|_| "Invalid start".to_string())?;
-    let end = usize::try_from(expect_int("slice", &args[2])?).map_err(|_| "Invalid end".to_string())?;
-    let end = end.min(items.len());
-    let start = start.min(end);
-    Ok(new_list(items[start..end].to_vec()))
-}
-
-pub fn builtin_insert(args: &[Value]) -> Result<Value, String> {
-    if args.len() != 3 {
-        return Err(format!("insert() expects 3 args, got {}", args.len()));
-    }
-    if let Value::List(list) = &args[0] {
-        let idx = usize::try_from(expect_int("insert", &args[1])?).map_err(|_| "Invalid index".to_string())?;
-        let mut list = list.borrow_mut();
-        if idx > list.len() {
-            return Err(format!("insert() index {idx} out of bounds (len {})", list.len()));
-        }
-        list.insert(idx, args[2].clone());
-        Ok(Value::Void)
-    } else {
-        Err(format!("Cannot insert into {}", args[0].type_name()))
-    }
-}
-
-pub fn builtin_remove(args: &[Value]) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("remove() expects 2 args, got {}", args.len()));
-    }
-    if let Value::List(list) = &args[0] {
-        let idx = usize::try_from(expect_int("remove", &args[1])?).map_err(|_| "Invalid index".to_string())?;
-        let mut list = list.borrow_mut();
-        if idx >= list.len() {
-            return Err(format!("remove() index {idx} out of bounds (len {})", list.len()));
-        }
-        Ok(list.remove(idx))
-    } else {
-        Err(format!("Cannot remove from {}", args[0].type_name()))
-    }
-}
-
-pub fn builtin_merge(args: &[Value]) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("merge() expects 2 args, got {}", args.len()));
-    }
-    if let (Value::Object(a), Value::Object(b)) = (&args[0], &args[1]) {
-        let mut merged = a.borrow().clone();
-        for (k, v) in b.borrow().iter() {
-            merged.insert(k.clone(), v.clone());
-        }
-        Ok(new_object(merged))
-    } else {
-        Err("merge() expects (object, object)".to_string())
-    }
-}
-
-pub fn builtin_count(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("count() expects 2 args, got {}", args.len()));
-    }
-    let items = expect_list("count", &args[0])?;
-    let lambda = &args[1];
-    let mut n: i64 = 0;
-    for item in &items {
-        let val = interp.call_lambda(lambda, vec![item.clone()])?;
-        if val.is_truthy() {
-            n += 1;
-        }
-    }
-    Ok(Value::Int(n))
-}
-
-pub fn builtin_any(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("any() expects 2 args, got {}", args.len()));
-    }
-    let items = expect_list("any", &args[0])?;
-    let lambda = &args[1];
-    for item in &items {
-        let val = interp.call_lambda(lambda, vec![item.clone()])?;
-        if val.is_truthy() {
-            return Ok(Value::Bool(true));
-        }
-    }
-    Ok(Value::Bool(false))
-}
-
-pub fn builtin_all(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("all() expects 2 args, got {}", args.len()));
-    }
-    let items = expect_list("all", &args[0])?;
-    let lambda = &args[1];
-    for item in &items {
-        let val = interp.call_lambda(lambda, vec![item.clone()])?;
-        if !val.is_truthy() {
-            return Ok(Value::Bool(false));
-        }
-    }
-    Ok(Value::Bool(true))
-}
-
-pub fn builtin_sum(args: &[Value]) -> Result<Value, String> {
-    expect_args("sum", args, 1)?;
-    let items = expect_list("sum", &args[0])?;
+fn builtin_sum(args: &[Value]) -> Result<Value, String> {
+    let Value::List(l) = &args[0] else { unreachable!() };
+    let items = l.borrow().clone();
     let mut int_sum: i64 = 0;
     let mut is_float = false;
     let mut float_sum: f64 = 0.0;
@@ -336,16 +202,14 @@ pub fn builtin_sum(args: &[Value]) -> Result<Value, String> {
         match item {
             Value::Int(n) => {
                 if is_float {
-                    #[expect(clippy::cast_precision_loss)]
-                    { float_sum += *n as f64; }
+                    float_sum += *n as f64;
                 } else {
                     int_sum += n;
                 }
             }
             Value::Float(n) => {
                 if !is_float {
-                    #[expect(clippy::cast_precision_loss)]
-                    { float_sum = int_sum as f64; }
+                    float_sum = int_sum as f64;
                     is_float = true;
                 }
                 float_sum += n;
@@ -356,9 +220,9 @@ pub fn builtin_sum(args: &[Value]) -> Result<Value, String> {
     if is_float { Ok(Value::Float(float_sum)) } else { Ok(Value::Int(int_sum)) }
 }
 
-pub fn builtin_min(args: &[Value]) -> Result<Value, String> {
-    expect_args("min", args, 1)?;
-    let items = expect_list("min", &args[0])?;
+fn builtin_min(args: &[Value]) -> Result<Value, String> {
+    let Value::List(l) = &args[0] else { unreachable!() };
+    let items = l.borrow().clone();
     if items.is_empty() {
         return Err("min() on empty list".to_string());
     }
@@ -371,9 +235,9 @@ pub fn builtin_min(args: &[Value]) -> Result<Value, String> {
     Ok(best.clone())
 }
 
-pub fn builtin_max(args: &[Value]) -> Result<Value, String> {
-    expect_args("max", args, 1)?;
-    let items = expect_list("max", &args[0])?;
+fn builtin_max(args: &[Value]) -> Result<Value, String> {
+    let Value::List(l) = &args[0] else { unreachable!() };
+    let items = l.borrow().clone();
     if items.is_empty() {
         return Err("max() on empty list".to_string());
     }
@@ -386,23 +250,112 @@ pub fn builtin_max(args: &[Value]) -> Result<Value, String> {
     Ok(best.clone())
 }
 
+// --- Named interpreter-dependent functions ---
+
+fn builtin_map(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+    let Value::List(l) = &args[0] else { unreachable!() };
+    let items = l.borrow().clone();
+    let lambda = &args[1];
+    let mut result = Vec::with_capacity(items.len());
+    for item in &items {
+        result.push(interp.call_lambda(lambda, vec![item.clone()])?);
+    }
+    Ok(new_list(result))
+}
+
+fn builtin_filter(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+    let Value::List(l) = &args[0] else { unreachable!() };
+    let items = l.borrow().clone();
+    let lambda = &args[1];
+    let mut result = Vec::new();
+    for item in &items {
+        let val = interp.call_lambda(lambda, vec![item.clone()])?;
+        if val.is_truthy() {
+            result.push(item.clone());
+        }
+    }
+    Ok(new_list(result))
+}
+
+fn builtin_reduce(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+    let Value::List(l) = &args[0] else { unreachable!() };
+    let items = l.borrow().clone();
+    let lambda = &args[1];
+    let mut acc = args[2].clone();
+    for item in &items {
+        acc = interp.call_lambda(lambda, vec![acc, item.clone()])?;
+    }
+    Ok(acc)
+}
+
+fn builtin_sort_by(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+    let Value::List(l) = &args[0] else { unreachable!() };
+    let items = l.borrow().clone();
+    let lambda = &args[1];
+    let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(items.len());
+    for item in &items {
+        let key = interp.call_lambda(lambda, vec![item.clone()])?;
+        keyed.push((item.clone(), key));
+    }
+    keyed.sort_by(|a, b| compare_values(&a.1, &b.1));
+    let sorted: Vec<Value> = keyed.into_iter().map(|(item, _)| item).collect();
+    Ok(new_list(sorted))
+}
+
+fn builtin_find(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+    let Value::List(l) = &args[0] else { unreachable!() };
+    let items = l.borrow().clone();
+    let lambda = &args[1];
+    for item in &items {
+        let val = interp.call_lambda(lambda, vec![item.clone()])?;
+        if val.is_truthy() {
+            return Ok(item.clone());
+        }
+    }
+    Err("find(): no element matches".to_string())
+}
+
+fn builtin_count(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+    let Value::List(l) = &args[0] else { unreachable!() };
+    let items = l.borrow().clone();
+    let lambda = &args[1];
+    let mut n: i64 = 0;
+    for item in &items {
+        let val = interp.call_lambda(lambda, vec![item.clone()])?;
+        if val.is_truthy() {
+            n += 1;
+        }
+    }
+    Ok(Value::Int(n))
+}
+
+fn builtin_any(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+    let Value::List(l) = &args[0] else { unreachable!() };
+    let items = l.borrow().clone();
+    let lambda = &args[1];
+    for item in &items {
+        let val = interp.call_lambda(lambda, vec![item.clone()])?;
+        if val.is_truthy() {
+            return Ok(Value::Bool(true));
+        }
+    }
+    Ok(Value::Bool(false))
+}
+
+fn builtin_all(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+    let Value::List(l) = &args[0] else { unreachable!() };
+    let items = l.borrow().clone();
+    let lambda = &args[1];
+    for item in &items {
+        let val = interp.call_lambda(lambda, vec![item.clone()])?;
+        if !val.is_truthy() {
+            return Ok(Value::Bool(false));
+        }
+    }
+    Ok(Value::Bool(true))
+}
+
 // --- Helpers ---
-
-fn expect_list(name: &str, val: &Value) -> Result<Vec<Value>, String> {
-    if let Value::List(list) = val {
-        Ok(list.borrow().clone())
-    } else {
-        Err(format!("{name}() expects list, got {}", val.type_name()))
-    }
-}
-
-fn expect_int(name: &str, val: &Value) -> Result<i64, String> {
-    if let Value::Int(n) = val {
-        Ok(*n)
-    } else {
-        Err(format!("{name}() expects int, got {}", val.type_name()))
-    }
-}
 
 fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {

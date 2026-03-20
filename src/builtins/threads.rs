@@ -3,10 +3,18 @@ use std::thread;
 use crate::interpreter::value::{Value, ThreadJoinHandle, new_list};
 use crate::interpreter::Interpreter;
 use crate::parser::ast::Resolution;
-use super::expect_args;
+use super::registry::{BuiltinRegistry, Param, Type};
 
-pub fn builtin_thread(args: &[Value], interp: &Interpreter) -> Result<Value, String> {
-    expect_args("thread", args, 1)?;
+pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
+    reg.add_interp("thread", &[Param::Required(Type::Lambda)], Type::ThreadHandle, builtin_thread)?;
+    reg.add("wait", &[Param::Required(Type::ThreadHandle)], Type::Dyn, builtin_wait)?;
+    reg.add("wait_all", &[Param::Required(Type::List)], Type::List, builtin_wait_all)?;
+    reg.add("wait_any", &[Param::Required(Type::List)], Type::Dyn, builtin_wait_any)?;
+
+    Ok(())
+}
+
+fn builtin_thread(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
     let lambda = match &args[0] {
         Value::Lambda { name, resolution, bound_args } => {
             (name.clone(), *resolution, bound_args.iter().map(Value::to_sendable).collect::<Vec<_>>())
@@ -20,8 +28,8 @@ pub fn builtin_thread(args: &[Value], interp: &Interpreter) -> Result<Value, Str
     let (fn_name, res_code, sendable_args) = lambda;
 
     let handle = thread::spawn(move || {
-        let mut thread_interp = Interpreter::new();
-        // Restore user functions in thread interpreter
+        let mut thread_interp = Interpreter::new()
+            .map_err(|e| format!("thread init failed: {e}"))?;
         thread_interp.env.restore_fns(user_fns);
 
         let call_args: Vec<Value> = sendable_args.into_iter().map(Value::from_sendable).collect();
@@ -39,8 +47,7 @@ pub fn builtin_thread(args: &[Value], interp: &Interpreter) -> Result<Value, Str
     }))))
 }
 
-pub fn builtin_wait(args: &[Value]) -> Result<Value, String> {
-    expect_args("wait", args, 1)?;
+fn builtin_wait(args: &[Value]) -> Result<Value, String> {
     if let Value::ThreadHandle(th) = &args[0] {
         let mut guard = th.lock().map_err(|e| format!("wait(): lock error: {e}"))?;
         let handle = guard.handle.take()
@@ -54,8 +61,7 @@ pub fn builtin_wait(args: &[Value]) -> Result<Value, String> {
     }
 }
 
-pub fn builtin_wait_all(args: &[Value]) -> Result<Value, String> {
-    expect_args("wait_all", args, 1)?;
+fn builtin_wait_all(args: &[Value]) -> Result<Value, String> {
     let handles = match &args[0] {
         Value::List(l) => l.borrow().clone(),
         other => return Err(format!("wait_all() expects list, got {}", other.type_name())),
@@ -77,8 +83,7 @@ pub fn builtin_wait_all(args: &[Value]) -> Result<Value, String> {
     Ok(new_list(results))
 }
 
-pub fn builtin_wait_any(args: &[Value]) -> Result<Value, String> {
-    expect_args("wait_any", args, 1)?;
+fn builtin_wait_any(args: &[Value]) -> Result<Value, String> {
     let handles = match &args[0] {
         Value::List(l) => l.borrow().clone(),
         other => return Err(format!("wait_any() expects list, got {}", other.type_name())),
@@ -91,7 +96,9 @@ pub fn builtin_wait_any(args: &[Value]) -> Result<Value, String> {
                 if let Some(ref handle) = guard.handle
                     && handle.is_finished()
                 {
-                    let handle = guard.handle.take().unwrap();
+                    let Some(handle) = guard.handle.take() else {
+                        return Err("wait_any(): thread handle already consumed".to_string());
+                    };
                     drop(guard);
                     let result = handle.join()
                         .map_err(|_| "wait_any(): thread panicked".to_string())?;

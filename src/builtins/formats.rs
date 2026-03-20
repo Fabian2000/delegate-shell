@@ -1,19 +1,37 @@
 use std::rc::Rc;
 use indexmap::IndexMap;
 use crate::interpreter::value::{Value, new_list, new_object};
+use super::registry::{BuiltinRegistry, Param, Type};
+
+pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
+    reg.add("from_json", &[Param::Required(Type::String)], Type::Dyn, builtin_from_json)?;
+    reg.add("to_json", &[Param::Required(Type::Dyn)], Type::String, builtin_to_json)?;
+    reg.add("from_toml", &[Param::Required(Type::String)], Type::Dyn, builtin_from_toml)?;
+    reg.add("to_toml", &[Param::Required(Type::Dyn)], Type::String, builtin_to_toml)?;
+    reg.add("from_yaml", &[Param::Required(Type::String)], Type::Dyn, builtin_from_yaml)?;
+    reg.add("to_yaml", &[Param::Required(Type::Dyn)], Type::String, builtin_to_yaml)?;
+    reg.add("from_csv", &[Param::Required(Type::String)], Type::List, builtin_from_csv)?;
+    reg.add("to_csv", &[Param::Required(Type::List)], Type::String, builtin_to_csv)?;
+    reg.add("to_base64", &[Param::Required(Type::String)], Type::String, builtin_to_base64)?;
+    reg.add("from_base64", &[Param::Required(Type::String)], Type::String, builtin_from_base64)?;
+    reg.add("to_hex", &[Param::Required(Type::String)], Type::String, builtin_to_hex)?;
+    reg.add("from_hex", &[Param::Required(Type::String)], Type::String, builtin_from_hex)?;
+    reg.add("url_encode", &[Param::Required(Type::String)], Type::String, builtin_url_encode)?;
+    reg.add("url_decode", &[Param::Required(Type::String)], Type::String, builtin_url_decode)?;
+
+    Ok(())
+}
 
 // === JSON ===
 
-pub fn builtin_from_json(args: &[Value]) -> Result<Value, String> {
-    super::expect_args("from_json", args, 1)?;
-    let s = expect_str("from_json", &args[0])?;
+fn builtin_from_json(args: &[Value]) -> Result<Value, String> {
+    let Value::String(s) = &args[0] else { unreachable!() };
     let json: serde_json::Value = serde_json::from_str(s)
         .map_err(|e| format!("from_json(): {e}"))?;
     Ok(json_to_value(&json))
 }
 
-pub fn builtin_to_json(args: &[Value]) -> Result<Value, String> {
-    super::expect_args("to_json", args, 1)?;
+fn builtin_to_json(args: &[Value]) -> Result<Value, String> {
     let json = value_to_json(&args[0])?;
     let s = serde_json::to_string_pretty(&json)
         .map_err(|e| format!("to_json(): {e}"))?;
@@ -60,7 +78,7 @@ fn value_to_json(val: &Value) -> Result<serde_json::Value, String> {
         }
         Value::Object(rc) => {
             let mut obj = serde_json::Map::new();
-            for (k, v) in rc.borrow().iter() {
+            for (k, v) in rc.borrow().fields.iter() {
                 obj.insert(k.clone(), value_to_json(v)?);
             }
             Ok(serde_json::Value::Object(obj))
@@ -71,16 +89,14 @@ fn value_to_json(val: &Value) -> Result<serde_json::Value, String> {
 
 // === TOML ===
 
-pub fn builtin_from_toml(args: &[Value]) -> Result<Value, String> {
-    super::expect_args("from_toml", args, 1)?;
-    let s = expect_str("from_toml", &args[0])?;
+fn builtin_from_toml(args: &[Value]) -> Result<Value, String> {
+    let Value::String(s) = &args[0] else { unreachable!() };
     let toml_val: toml::Value = s.parse()
         .map_err(|e| format!("from_toml(): {e}"))?;
     Ok(toml_to_value(&toml_val))
 }
 
-pub fn builtin_to_toml(args: &[Value]) -> Result<Value, String> {
-    super::expect_args("to_toml", args, 1)?;
+fn builtin_to_toml(args: &[Value]) -> Result<Value, String> {
     let toml_val = value_to_toml(&args[0])?;
     let s = toml::to_string_pretty(&toml_val)
         .map_err(|e| format!("to_toml(): {e}"))?;
@@ -120,7 +136,7 @@ fn value_to_toml(val: &Value) -> Result<toml::Value, String> {
         }
         Value::Object(rc) => {
             let mut table = toml::map::Map::new();
-            for (k, v) in rc.borrow().iter() {
+            for (k, v) in rc.borrow().fields.iter() {
                 table.insert(k.clone(), value_to_toml(v)?);
             }
             Ok(toml::Value::Table(table))
@@ -131,16 +147,14 @@ fn value_to_toml(val: &Value) -> Result<toml::Value, String> {
 
 // === YAML ===
 
-pub fn builtin_from_yaml(args: &[Value]) -> Result<Value, String> {
-    super::expect_args("from_yaml", args, 1)?;
-    let s = expect_str("from_yaml", &args[0])?;
+fn builtin_from_yaml(args: &[Value]) -> Result<Value, String> {
+    let Value::String(s) = &args[0] else { unreachable!() };
     let yaml: serde_yaml::Value = serde_yaml::from_str(s)
         .map_err(|e| format!("from_yaml(): {e}"))?;
     Ok(yaml_to_value(&yaml))
 }
 
-pub fn builtin_to_yaml(args: &[Value]) -> Result<Value, String> {
-    super::expect_args("to_yaml", args, 1)?;
+fn builtin_to_yaml(args: &[Value]) -> Result<Value, String> {
     let yaml = value_to_yaml(&args[0])?;
     let s = serde_yaml::to_string(&yaml)
         .map_err(|e| format!("to_yaml(): {e}"))?;
@@ -190,7 +204,7 @@ fn value_to_yaml(val: &Value) -> Result<serde_yaml::Value, String> {
         }
         Value::Object(rc) => {
             let mut mapping = serde_yaml::Mapping::new();
-            for (k, v) in rc.borrow().iter() {
+            for (k, v) in rc.borrow().fields.iter() {
                 mapping.insert(serde_yaml::Value::String(k.clone()), value_to_yaml(v)?);
             }
             Ok(serde_yaml::Value::Mapping(mapping))
@@ -201,9 +215,8 @@ fn value_to_yaml(val: &Value) -> Result<serde_yaml::Value, String> {
 
 // === CSV ===
 
-pub fn builtin_from_csv(args: &[Value]) -> Result<Value, String> {
-    super::expect_args("from_csv", args, 1)?;
-    let s = expect_str("from_csv", &args[0])?;
+fn builtin_from_csv(args: &[Value]) -> Result<Value, String> {
+    let Value::String(s) = &args[0] else { unreachable!() };
     let mut lines = s.lines();
     let header: Vec<&str> = match lines.next() {
         Some(h) => h.split(',').map(str::trim).collect(),
@@ -223,27 +236,24 @@ pub fn builtin_from_csv(args: &[Value]) -> Result<Value, String> {
     Ok(new_list(rows))
 }
 
-pub fn builtin_to_csv(args: &[Value]) -> Result<Value, String> {
-    super::expect_args("to_csv", args, 1)?;
-    let items = match &args[0] {
-        Value::List(l) => l.borrow().clone(),
-        other => return Err(format!("to_csv() expects list, got {}", other.type_name())),
-    };
+fn builtin_to_csv(args: &[Value]) -> Result<Value, String> {
+    let Value::List(items) = &args[0] else { unreachable!() };
+    let items = items.borrow();
     if items.is_empty() {
         return Ok(Value::String(Rc::from("")));
     }
     // Get headers from first object
     let headers: Vec<String> = match &items[0] {
-        Value::Object(rc) => rc.borrow().keys().cloned().collect(),
+        Value::Object(rc) => rc.borrow().fields.keys().cloned().collect(),
         _ => return Err("to_csv() expects list of objects".to_string()),
     };
     let mut result = headers.join(",");
     result.push('\n');
-    for item in &items {
+    for item in items.iter() {
         if let Value::Object(rc) = item {
             let map = rc.borrow();
             let row: Vec<String> = headers.iter()
-                .map(|h| map.get(h).map(ToString::to_string).unwrap_or_default())
+                .map(|h| map.fields.get(h).map(ToString::to_string).unwrap_or_default())
                 .collect();
             result.push_str(&row.join(","));
             result.push('\n');
@@ -254,15 +264,13 @@ pub fn builtin_to_csv(args: &[Value]) -> Result<Value, String> {
 
 // === Base64 ===
 
-pub fn builtin_to_base64(args: &[Value]) -> Result<Value, String> {
-    super::expect_args("to_base64", args, 1)?;
-    let s = expect_str("to_base64", &args[0])?;
+fn builtin_to_base64(args: &[Value]) -> Result<Value, String> {
+    let Value::String(s) = &args[0] else { unreachable!() };
     Ok(Value::String(Rc::from(base64_encode(s.as_bytes()))))
 }
 
-pub fn builtin_from_base64(args: &[Value]) -> Result<Value, String> {
-    super::expect_args("from_base64", args, 1)?;
-    let s = expect_str("from_base64", &args[0])?;
+fn builtin_from_base64(args: &[Value]) -> Result<Value, String> {
+    let Value::String(s) = &args[0] else { unreachable!() };
     let bytes = base64_decode(s)?;
     String::from_utf8(bytes)
         .map(|s| Value::String(Rc::from(s)))
@@ -315,18 +323,16 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
 
 // === Hex ===
 
-pub fn builtin_to_hex(args: &[Value]) -> Result<Value, String> {
+fn builtin_to_hex(args: &[Value]) -> Result<Value, String> {
     use std::fmt::Write;
-    super::expect_args("to_hex", args, 1)?;
-    let s = expect_str("to_hex", &args[0])?;
+    let Value::String(s) = &args[0] else { unreachable!() };
     let mut hex = String::with_capacity(s.len() * 2);
     for b in s.bytes() { let _ = write!(hex, "{b:02x}"); }
     Ok(Value::String(Rc::from(hex)))
 }
 
-pub fn builtin_from_hex(args: &[Value]) -> Result<Value, String> {
-    super::expect_args("from_hex", args, 1)?;
-    let s = expect_str("from_hex", &args[0])?;
+fn builtin_from_hex(args: &[Value]) -> Result<Value, String> {
+    let Value::String(s) = &args[0] else { unreachable!() };
     let mut bytes = Vec::new();
     let chars: Vec<char> = s.chars().collect();
     for pair in chars.chunks(2) {
@@ -344,9 +350,8 @@ pub fn builtin_from_hex(args: &[Value]) -> Result<Value, String> {
 
 // === URL Encoding ===
 
-pub fn builtin_url_encode(args: &[Value]) -> Result<Value, String> {
-    super::expect_args("url_encode", args, 1)?;
-    let s = expect_str("url_encode", &args[0])?;
+fn builtin_url_encode(args: &[Value]) -> Result<Value, String> {
+    let Value::String(s) = &args[0] else { unreachable!() };
     let mut result = String::new();
     for b in s.bytes() {
         match b {
@@ -364,9 +369,8 @@ pub fn builtin_url_encode(args: &[Value]) -> Result<Value, String> {
     Ok(Value::String(Rc::from(result)))
 }
 
-pub fn builtin_url_decode(args: &[Value]) -> Result<Value, String> {
-    super::expect_args("url_decode", args, 1)?;
-    let s = expect_str("url_decode", &args[0])?;
+fn builtin_url_decode(args: &[Value]) -> Result<Value, String> {
+    let Value::String(s) = &args[0] else { unreachable!() };
     let mut result = Vec::new();
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -388,14 +392,4 @@ pub fn builtin_url_decode(args: &[Value]) -> Result<Value, String> {
     String::from_utf8(result)
         .map(|s| Value::String(Rc::from(s)))
         .map_err(|e| format!("url_decode(): invalid UTF-8: {e}"))
-}
-
-// --- Helper ---
-
-fn expect_str<'a>(name: &str, val: &'a Value) -> Result<&'a str, String> {
-    if let Value::String(s) = val {
-        Ok(&**s)
-    } else {
-        Err(format!("{name}() expects string, got {}", val.type_name()))
-    }
 }

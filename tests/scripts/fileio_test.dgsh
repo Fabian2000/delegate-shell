@@ -9,15 +9,11 @@ write!!(tmp, "line one\nline two\nline three\n")
 println("=== read_line loop ===")
 fh = open_file!!(tmp)
 count = 0
-reading = true
-while reading
-    free result
-    result = read_line!!(fh)
-    if type(result) == "bool"
-        reading = false
-    else
-        count = count + 1
-        println("line " + str(count) + ": " + result)
+line? = read_line(fh)
+while line?
+    count = count + 1
+    println("line " + str(count) + ": " + line)
+    line? = read_line(fh)
 close_file!!(fh)
 println("total lines: " + str(count))
 
@@ -26,15 +22,11 @@ println("=== read_chunk loop ===")
 fh2 = open_file!!(tmp)
 total_bytes = 0
 chunks = 0
-chunking = true
-while chunking
-    chunk = read_chunk!!(fh2, 10)
-    sz = byte_len(chunk)
-    if sz == 0
-        chunking = false
-    else
-        total_bytes = total_bytes + sz
-        chunks = chunks + 1
+chunk? = read_chunk(fh2, 10)
+while chunk?
+    total_bytes = total_bytes + byte_len(chunk)
+    chunks = chunks + 1
+    chunk? = read_chunk(fh2, 10)
 close_file!!(fh2)
 println("chunks: " + str(chunks))
 println("total bytes: " + str(total_bytes))

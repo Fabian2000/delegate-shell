@@ -25,3 +25,27 @@ println("loop count: " + str(count))
 f = 1.5
 f++
 println("float++: " + str(f))
+
+# As expressions: post-increment returns old value
+a = 5
+b = a++
+println("post++ expr old: " + str(b))
+println("post++ expr new: " + str(a))
+
+# As expressions: pre-increment returns new value
+c = 10
+d = ++c
+println("pre++ expr new: " + str(d))
+println("pre++ expr var: " + str(c))
+
+# Post-decrement as expression
+e = 7
+f2 = e--
+println("post-- expr old: " + str(f2))
+println("post-- expr new: " + str(e))
+
+# Pre-decrement as expression
+g = 3
+h = --g
+println("pre-- expr new: " + str(h))
+println("pre-- expr var: " + str(g))

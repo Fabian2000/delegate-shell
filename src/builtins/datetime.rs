@@ -1,8 +1,9 @@
 use chrono::{Local, TimeZone, NaiveDateTime};
 use indexmap::IndexMap;
 use crate::interpreter::value::{Value, new_object};
+use super::registry::{BuiltinRegistry, Param, Type};
 
-pub fn builtin_now(_args: &[Value]) -> Value {
+fn now(_args: &[Value]) -> Result<Value, String> {
     let now = Local::now();
     let mut obj = IndexMap::new();
     obj.insert("year".to_string(), Value::Int(i64::from(now.format("%Y").to_string().parse::<i32>().unwrap_or(0))));
@@ -12,44 +13,21 @@ pub fn builtin_now(_args: &[Value]) -> Value {
     obj.insert("min".to_string(), Value::Int(i64::from(now.format("%M").to_string().parse::<u32>().unwrap_or(0))));
     obj.insert("sec".to_string(), Value::Int(i64::from(now.format("%S").to_string().parse::<u32>().unwrap_or(0))));
     obj.insert("unix".to_string(), Value::Int(now.timestamp()));
-    new_object(obj)
+    Ok(new_object(obj))
 }
 
-pub fn builtin_timestamp(_args: &[Value]) -> Value {
-    let now = Local::now();
-    Value::Int(now.timestamp())
-}
-
-pub fn builtin_date_format(args: &[Value]) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("date_format() expects 2 args, got {}", args.len()));
-    }
-    let ts = match &args[0] {
-        Value::Int(n) => *n,
-        other => return Err(format!("date_format() timestamp must be int, got {}", other.type_name())),
-    };
-    let pattern = match &args[1] {
-        Value::String(s) => s.clone(),
-        other => return Err(format!("date_format() pattern must be string, got {}", other.type_name())),
-    };
-    let dt = Local.timestamp_opt(ts, 0)
+fn date_format(args: &[Value]) -> Result<Value, String> {
+    let Value::Int(ts) = &args[0] else { unreachable!() };
+    let Value::String(pattern) = &args[1] else { unreachable!() };
+    let dt = Local.timestamp_opt(*ts, 0)
         .single()
         .ok_or_else(|| format!("Invalid timestamp: {ts}"))?;
-    Ok(Value::String(std::rc::Rc::from(dt.format(&pattern).to_string())))
+    Ok(Value::String(std::rc::Rc::from(dt.format(pattern).to_string())))
 }
 
-pub fn builtin_date_parse(args: &[Value]) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("date_parse() expects 2 args, got {}", args.len()));
-    }
-    let s = match &args[0] {
-        Value::String(s) => &**s,
-        other => return Err(format!("date_parse() input must be string, got {}", other.type_name())),
-    };
-    let pattern = match &args[1] {
-        Value::String(s) => &**s,
-        other => return Err(format!("date_parse() pattern must be string, got {}", other.type_name())),
-    };
+fn date_parse(args: &[Value]) -> Result<Value, String> {
+    let Value::String(s) = &args[0] else { unreachable!() };
+    let Value::String(pattern) = &args[1] else { unreachable!() };
     let naive = NaiveDateTime::parse_from_str(s, pattern)
         .map_err(|e| format!("date_parse('{s}', '{pattern}'): {e}"))?;
     let local = Local.from_local_datetime(&naive)
@@ -58,17 +36,18 @@ pub fn builtin_date_parse(args: &[Value]) -> Result<Value, String> {
     Ok(Value::Int(local.timestamp()))
 }
 
-pub fn builtin_elapsed(args: &[Value]) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("elapsed() expects 2 args, got {}", args.len()));
-    }
-    let start = match &args[0] {
-        Value::Int(n) => *n,
-        other => return Err(format!("elapsed() start must be int, got {}", other.type_name())),
-    };
-    let end = match &args[1] {
-        Value::Int(n) => *n,
-        other => return Err(format!("elapsed() end must be int, got {}", other.type_name())),
-    };
-    Ok(Value::Int(end - start))
+pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
+    reg.add("now", &[], Type::Object, now)?;
+    reg.add("timestamp", &[], Type::Int, |_args| {
+        Ok(Value::Int(Local::now().timestamp()))
+    })?;
+    reg.add("date_format", &[Param::Required(Type::Int), Param::Required(Type::String)], Type::String, date_format)?;
+    reg.add("date_parse", &[Param::Required(Type::String), Param::Required(Type::String)], Type::Int, date_parse)?;
+    reg.add("elapsed", &[Param::Required(Type::Int), Param::Required(Type::Int)], Type::Int, |args| {
+        let Value::Int(start) = &args[0] else { unreachable!() };
+        let Value::Int(end) = &args[1] else { unreachable!() };
+        Ok(Value::Int(end - start))
+    })?;
+
+    Ok(())
 }

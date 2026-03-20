@@ -115,7 +115,7 @@ const PURE_BUILTINS: &[&str] = &[
     // Hashing
     "md5", "sha256", "sha512", "uuid",
     // Threads
-    "thread", "wait", "wait_all", "wait_any", "atomic",
+    "thread", "wait", "wait_all", "wait_any",
     // File I/O (streaming)
     "open_file", "read_line", "read_chunk", "close_file",
     "byte_len", "byte_at", "byte_slice", "to_bytes", "from_bytes",
@@ -313,7 +313,7 @@ impl MigrateContext {
             if let Some(paren_pos) = find_case_pattern_end(line) {
                 let pattern = line[..paren_pos].trim_start_matches('(').trim();
                 let rest = line[paren_pos+1..].trim();
-                if pattern == "*" { self.push_line("_"); }
+                if pattern == "*" { self.push_line("default"); }
                 else { self.push_line(&convert_case_pattern(pattern)); }
                 self.indent_level += 1;
                 let body = rest.trim_end_matches(";;").trim();

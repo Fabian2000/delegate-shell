@@ -16,12 +16,12 @@ static CMD_CACHE: LazyLock<Mutex<HashMap<String, Option<PathBuf>>>> =
 ///
 /// Panics if the internal mutex is poisoned.
 pub fn clear_cache() {
-    CMD_CACHE.lock().unwrap().clear();
+    CMD_CACHE.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 /// Check if a command exists on PATH without spawning a process.
 fn find_on_path(name: &str) -> Option<PathBuf> {
-    let mut cache = CMD_CACHE.lock().unwrap();
+    let mut cache = CMD_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(cached) = cache.get(name) {
         return cached.clone();
     }

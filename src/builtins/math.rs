@@ -1,143 +1,51 @@
 use crate::interpreter::value::Value;
-use super::expect_args;
+use super::registry::{BuiltinRegistry, Param, Type};
 
-pub fn builtin_abs_num(args: &[Value]) -> Result<Value, String> {
-    expect_args("abs_num", args, 1)?;
-    match &args[0] {
-        Value::Int(n) => Ok(Value::Int(n.abs())),
-        Value::Float(n) => Ok(Value::Float(n.abs())),
-        other => Err(format!("abs_num() expects number, got {}", other.type_name())),
+fn to_f64(val: &Value) -> f64 {
+    match val {
+        Value::Int(n) => *n as f64,
+        Value::Float(n) => *n,
+        _ => unreachable!(),
     }
 }
 
-pub fn builtin_ceil(args: &[Value]) -> Result<Value, String> {
-    expect_args("ceil", args, 1)?;
-    match &args[0] {
-        Value::Float(n) => {
-            #[expect(clippy::cast_possible_truncation)]
-            Ok(Value::Int(n.ceil() as i64))
-        }
-        Value::Int(n) => Ok(Value::Int(*n)),
-        other => Err(format!("ceil() expects number, got {}", other.type_name())),
-    }
-}
-
-pub fn builtin_floor(args: &[Value]) -> Result<Value, String> {
-    expect_args("floor", args, 1)?;
-    match &args[0] {
-        Value::Float(n) => {
-            #[expect(clippy::cast_possible_truncation)]
-            Ok(Value::Int(n.floor() as i64))
-        }
-        Value::Int(n) => Ok(Value::Int(*n)),
-        other => Err(format!("floor() expects number, got {}", other.type_name())),
-    }
-}
-
-pub fn builtin_round(args: &[Value]) -> Result<Value, String> {
-    if args.is_empty() || args.len() > 2 {
-        return Err(format!("round() expects 1-2 args, got {}", args.len()));
-    }
+fn round(args: &[Value]) -> Result<Value, String> {
     let decimals = if args.len() == 2 {
-        match &args[1] {
-            Value::Int(n) => u32::try_from(*n).map_err(|_| format!("Invalid decimals: {n}"))?,
-            _ => return Err(format!("round() decimals must be int, got {}", args[1].type_name())),
-        }
+        let Value::Int(n) = &args[1] else { unreachable!() };
+        u32::try_from(*n).map_err(|_| format!("Invalid decimals: {n}"))?
     } else {
         0
     };
     match &args[0] {
         Value::Float(n) => {
             if decimals == 0 {
-                #[expect(clippy::cast_possible_truncation)]
                 return Ok(Value::Int(n.round() as i64));
             }
             let factor = 10_f64.powi(decimals.cast_signed());
             Ok(Value::Float((n * factor).round() / factor))
         }
         Value::Int(n) => Ok(Value::Int(*n)),
-        other => Err(format!("round() expects number, got {}", other.type_name())),
+        _ => unreachable!(),
     }
 }
 
-pub fn builtin_sqrt(args: &[Value]) -> Result<Value, String> {
-    expect_args("sqrt", args, 1)?;
-    let n = to_f64("sqrt", &args[0])?;
-    if n < 0.0 {
-        return Err("sqrt() of negative number".to_string());
-    }
-    Ok(Value::Float(n.sqrt()))
-}
-
-pub fn builtin_pow(args: &[Value]) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("pow() expects 2 args, got {}", args.len()));
-    }
+fn pow(args: &[Value]) -> Result<Value, String> {
     if let (Value::Int(base), Value::Int(exp)) = (&args[0], &args[1]) {
         u32::try_from(*exp).map_or_else(
-            |_| {
-                #[expect(clippy::cast_precision_loss)]
-                Ok(Value::Float((*base as f64).powf(*exp as f64)))
-            },
+            |_| Ok(Value::Float((*base as f64).powf(*exp as f64))),
             |e| Ok(Value::Int(base.pow(e))),
         )
     } else {
-        let base = to_f64("pow", &args[0])?;
-        let exp = to_f64("pow", &args[1])?;
+        let base = to_f64(&args[0]);
+        let exp = to_f64(&args[1]);
         Ok(Value::Float(base.powf(exp)))
     }
 }
 
-pub fn builtin_log(args: &[Value]) -> Result<Value, String> {
-    expect_args("log", args, 1)?;
-    let n = to_f64("log", &args[0])?;
-    Ok(Value::Float(n.ln()))
-}
-
-pub fn builtin_log10(args: &[Value]) -> Result<Value, String> {
-    expect_args("log10", args, 1)?;
-    let n = to_f64("log10", &args[0])?;
-    Ok(Value::Float(n.log10()))
-}
-
-pub fn builtin_sin(args: &[Value]) -> Result<Value, String> {
-    expect_args("sin", args, 1)?;
-    Ok(Value::Float(to_f64("sin", &args[0])?.sin()))
-}
-
-pub fn builtin_cos(args: &[Value]) -> Result<Value, String> {
-    expect_args("cos", args, 1)?;
-    Ok(Value::Float(to_f64("cos", &args[0])?.cos()))
-}
-
-pub fn builtin_tan(args: &[Value]) -> Result<Value, String> {
-    expect_args("tan", args, 1)?;
-    Ok(Value::Float(to_f64("tan", &args[0])?.tan()))
-}
-
-pub fn builtin_random(_args: &[Value]) -> Value {
-    // Simple LCG random - good enough for shell scripting
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    #[expect(clippy::cast_precision_loss)]
-    let val = ((seed ^ (seed >> 16)) & 0xFFFF_FFFF) as f64 / 0xFFFF_FFFF_u64 as f64;
-    Value::Float(val)
-}
-
-pub fn builtin_random_int(args: &[Value]) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("random_int() expects 2 args, got {}", args.len()));
-    }
-    let min = match &args[0] {
-        Value::Int(n) => *n,
-        other => return Err(format!("random_int() min must be int, got {}", other.type_name())),
-    };
-    let max = match &args[1] {
-        Value::Int(n) => *n,
-        other => return Err(format!("random_int() max must be int, got {}", other.type_name())),
-    };
+fn random_int(args: &[Value]) -> Result<Value, String> {
+    let Value::Int(min) = &args[0] else { unreachable!() };
+    let Value::Int(max) = &args[1] else { unreachable!() };
+    let (min, max) = (*min, *max);
     if min > max {
         return Err(format!("random_int(): min ({min}) > max ({max})"));
     }
@@ -152,21 +60,81 @@ pub fn builtin_random_int(args: &[Value]) -> Result<Value, String> {
     Ok(Value::Int(val))
 }
 
-pub const fn builtin_pi(_args: &[Value]) -> Value {
-    Value::Float(std::f64::consts::PI)
-}
+pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
+    reg.add("abs_num", &[Param::Required(Type::Number)], Type::Number, |args| {
+        match &args[0] {
+            Value::Int(n) => Ok(Value::Int(n.abs())),
+            Value::Float(n) => Ok(Value::Float(n.abs())),
+            _ => unreachable!(),
+        }
+    })?;
 
-pub const fn builtin_infinity(_args: &[Value]) -> Value {
-    Value::Float(f64::INFINITY)
-}
+    reg.add("ceil", &[Param::Required(Type::Number)], Type::Int, |args| {
+        match &args[0] {
+            Value::Float(n) => Ok(Value::Int(n.ceil() as i64)),
+            Value::Int(n) => Ok(Value::Int(*n)),
+            _ => unreachable!(),
+        }
+    })?;
 
-// --- Helper ---
+    reg.add("floor", &[Param::Required(Type::Number)], Type::Int, |args| {
+        match &args[0] {
+            Value::Float(n) => Ok(Value::Int(n.floor() as i64)),
+            Value::Int(n) => Ok(Value::Int(*n)),
+            _ => unreachable!(),
+        }
+    })?;
 
-fn to_f64(name: &str, val: &Value) -> Result<f64, String> {
-    match val {
-        #[expect(clippy::cast_precision_loss)]
-        Value::Int(n) => Ok(*n as f64),
-        Value::Float(n) => Ok(*n),
-        other => Err(format!("{name}() expects number, got {}", other.type_name())),
-    }
+    reg.add("round", &[Param::Required(Type::Number), Param::Optional(Type::Int)], Type::Number, round)?;
+
+    reg.add("sqrt", &[Param::Required(Type::Number)], Type::Float, |args| {
+        let n = to_f64(&args[0]);
+        if n < 0.0 {
+            return Err("sqrt() of negative number".to_string());
+        }
+        Ok(Value::Float(n.sqrt()))
+    })?;
+
+    reg.add("pow", &[Param::Required(Type::Number), Param::Required(Type::Number)], Type::Number, pow)?;
+
+    reg.add("log", &[Param::Required(Type::Number)], Type::Float, |args| {
+        Ok(Value::Float(to_f64(&args[0]).ln()))
+    })?;
+
+    reg.add("log10", &[Param::Required(Type::Number)], Type::Float, |args| {
+        Ok(Value::Float(to_f64(&args[0]).log10()))
+    })?;
+
+    reg.add("sin", &[Param::Required(Type::Number)], Type::Float, |args| {
+        Ok(Value::Float(to_f64(&args[0]).sin()))
+    })?;
+
+    reg.add("cos", &[Param::Required(Type::Number)], Type::Float, |args| {
+        Ok(Value::Float(to_f64(&args[0]).cos()))
+    })?;
+
+    reg.add("tan", &[Param::Required(Type::Number)], Type::Float, |args| {
+        Ok(Value::Float(to_f64(&args[0]).tan()))
+    })?;
+
+    reg.add("random", &[], Type::Float, |_args| {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let val = ((seed ^ (seed >> 16)) & 0xFFFF_FFFF) as f64 / 0xFFFF_FFFF_u64 as f64;
+        Ok(Value::Float(val))
+    })?;
+
+    reg.add("random_int", &[Param::Required(Type::Int), Param::Required(Type::Int)], Type::Int, random_int)?;
+
+    reg.add("pi", &[], Type::Float, |_args| {
+        Ok(Value::Float(std::f64::consts::PI))
+    })?;
+
+    reg.add("infinity", &[], Type::Float, |_args| {
+        Ok(Value::Float(f64::INFINITY))
+    })?;
+
+    Ok(())
 }

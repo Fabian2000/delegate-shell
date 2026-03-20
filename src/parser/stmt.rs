@@ -1,5 +1,5 @@
 use crate::lexer::token::{Token, SpannedToken, Span};
-use crate::parser::ast::{Stmt, StmtKind, ExprKind, Expr, CompoundOp};
+use crate::parser::ast::{Stmt, StmtKind, ExprKind, Expr, CompoundOp, TypeAnnotation};
 use crate::parser::expr::ExprParser;
 
 pub struct StmtParser<'a> {
@@ -108,6 +108,8 @@ impl<'a> StmtParser<'a> {
             Token::Throw => self.parse_throw(),
             Token::Enum => self.parse_enum(),
             Token::Match => self.parse_match(),
+            Token::Alias => self.parse_alias(),
+            Token::Dyn => self.parse_dyn(),
             Token::Increment => {
                 // pre-increment: ++x
                 self.advance();
@@ -153,6 +155,14 @@ impl<'a> StmtParser<'a> {
             _ => {}
         }
 
+        // Check for type annotation: x: type = ...
+        // This must come before the `?` check since `x: type? = ...` is not supported.
+        let type_ann = if *self.peek_raw() == Token::Colon {
+            self.try_parse_type_annotation()?
+        } else {
+            None
+        };
+
         // Check for ? (error-tolerant assignment)
         let error_tolerant = if *self.peek_raw() == Token::Question {
             self.advance();
@@ -167,7 +177,7 @@ impl<'a> StmtParser<'a> {
                 self.advance();
                 let expr = self.parse_expression()?;
                 Ok(Stmt {
-                    kind: StmtKind::Assign { name, error_tolerant, expr },
+                    kind: StmtKind::Assign { name, error_tolerant, type_ann, is_dyn: false, expr },
                     span,
                 })
             }
@@ -175,6 +185,11 @@ impl<'a> StmtParser<'a> {
             Token::SlashAssign | Token::PercentAssign | Token::PowerAssign |
             Token::BitAndAssign | Token::BitOrAssign | Token::BitXorAssign |
             Token::ShlAssign | Token::ShrAssign => {
+                if type_ann.is_some() {
+                    return Err(format!(
+                        "Type annotation on '{name}' is only allowed with '=' assignment, not compound assignment"
+                    ));
+                }
                 let op_tok = self.advance().token.clone();
                 let op = token_to_compound_op(&op_tok)?;
                 let expr = self.parse_expression()?;
@@ -184,15 +199,30 @@ impl<'a> StmtParser<'a> {
                 })
             }
             Token::LParen => {
+                if type_ann.is_some() {
+                    return Err(format!(
+                        "Type annotation on '{name}' is only allowed with '=' assignment, not a function definition or call"
+                    ));
+                }
                 self.pos = saved_pos;
                 self.parse_possible_fn_def_or_expr()
             }
             Token::Bang => {
+                if type_ann.is_some() {
+                    return Err(format!(
+                        "Type annotation on '{name}' is only allowed with '=' assignment"
+                    ));
+                }
                 self.pos = saved_pos;
                 let expr = self.parse_expression()?;
                 Ok(Stmt { kind: StmtKind::ExprStmt(expr), span })
             }
             Token::LBracket | Token::Dot if !error_tolerant => {
+                if type_ann.is_some() {
+                    return Err(format!(
+                        "Type annotation on '{name}' is only allowed with '=' assignment"
+                    ));
+                }
                 self.pos = saved_pos;
                 let expr = self.parse_expression()?;
                 if *self.peek_raw() == Token::Assign {
@@ -220,6 +250,11 @@ impl<'a> StmtParser<'a> {
                 if error_tolerant {
                     return Err("'?' requires an assignment (x? = ...)".to_string());
                 }
+                if type_ann.is_some() {
+                    return Err(format!(
+                        "Type annotation on '{name}' requires an '=' assignment"
+                    ));
+                }
                 self.pos = saved_pos;
                 let expr = self.parse_expression()?;
                 Ok(Stmt { kind: StmtKind::ExprStmt(expr), span })
@@ -230,34 +265,153 @@ impl<'a> StmtParser<'a> {
     fn parse_possible_fn_def_or_expr(&mut self) -> Result<Stmt, String> {
         let span = self.peek_span();
 
-        // Parse as expression first
-        let expr = self.parse_expression()?;
-
-        // Check if Indent follows — then it's a function definition
-        self.skip_newlines();
-        if *self.peek_raw() == Token::Indent {
-            // It's a function definition
-            if let ExprKind::Call { name, args, .. } = &expr.kind {
-                let params: Vec<String> = args.iter().map(|a| {
-                    if let ExprKind::Ident(n) = &a.kind {
-                        Ok(n.clone())
-                    } else {
-                        Err("Function parameters must be identifiers".to_string())
-                    }
-                }).collect::<Result<Vec<_>, _>>()?;
-
-                self.advance(); // consume Indent
-                let body = self.parse_block()?;
-
-                return Ok(Stmt {
-                    kind: StmtKind::FnDef { name: name.clone(), params, body },
-                    span,
-                });
-            }
-            return Err("Expected function call before definition block".to_string());
+        // Check if Indent follows — then it's a function definition.
+        // We need to check for optional params <ident> before parsing as expression,
+        // since the expression parser won't handle <ident> as a param in this context.
+        // Parse the function name and param list manually if the lookahead suggests fn def.
+        if let Some(fn_def) = self.try_parse_fn_def(span)? {
+            return Ok(fn_def);
         }
 
+        // Parse as expression
+        let expr = self.parse_expression()?;
         Ok(Stmt { kind: StmtKind::ExprStmt(expr), span })
+    }
+
+    /// Try to parse a function definition: `name(params...) INDENT body DEDENT`.
+    /// Handles both required params (ident) and optional params (<ident>).
+    /// Returns None if this doesn't look like a function definition.
+    fn try_parse_fn_def(&mut self, span: crate::lexer::token::Span) -> Result<Option<Stmt>, String> {
+        // We need: Ident LParen ... RParen Newline Indent
+        // Peek ahead to see if there's a definition block
+        let saved_pos = self.pos;
+
+        // Expect identifier (function name)
+        let name = if let Token::Ident(n) = self.peek_raw().clone() {
+            self.advance();
+            n
+        } else {
+            self.pos = saved_pos;
+            return Ok(None);
+        };
+
+        // Expect '('
+        if *self.peek_raw() != Token::LParen {
+            self.pos = saved_pos;
+            return Ok(None);
+        }
+        self.advance();
+
+        // Parse parameters: required (ident) or optional (<ident>), each with optional `: type`
+        let mut params: Vec<(String, Option<TypeAnnotation>, bool)> = Vec::new();
+        let mut optional_params: Vec<(String, Option<TypeAnnotation>, bool)> = Vec::new();
+        let mut seen_optional = false;
+
+        loop {
+            // Skip any whitespace/newlines inside parens
+            if *self.peek_raw() == Token::RParen {
+                self.advance();
+                break;
+            }
+
+            // Check for dyn modifier on param
+            let param_is_dyn = if *self.peek_raw() == Token::Dyn {
+                self.advance();
+                true
+            } else {
+                false
+            };
+
+            // Check for optional param: < ident >
+            if *self.peek_raw() == Token::Lt {
+                let lt_pos = self.pos;
+                self.advance(); // consume '<'
+                if let Token::Ident(param_name) = self.peek_raw().clone() {
+                    self.advance(); // consume ident
+                    // Optional type annotation on optional param: <name: type>
+                    let ann = if *self.peek_raw() == Token::Colon {
+                        if param_is_dyn {
+                            return Err(format!("'dyn' and type annotation on '{param_name}' are incompatible"));
+                        }
+                        match self.try_parse_type_annotation() {
+                            Ok(a) => a,
+                            Err(_) => {
+                                self.pos = lt_pos;
+                                self.pos = saved_pos;
+                                return Ok(None);
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    if *self.peek_raw() == Token::Gt {
+                        self.advance(); // consume '>'
+                        seen_optional = true;
+                        optional_params.push((param_name, ann, param_is_dyn));
+                    } else {
+                        // Not <ident> — restore and bail
+                        self.pos = lt_pos;
+                        self.pos = saved_pos;
+                        return Ok(None);
+                    }
+                } else {
+                    self.pos = lt_pos;
+                    self.pos = saved_pos;
+                    return Ok(None);
+                }
+            } else if let Token::Ident(param_name) = self.peek_raw().clone() {
+                if seen_optional {
+                    self.pos = saved_pos;
+                    return Err("Required parameters must come before optional parameters".to_string());
+                }
+                self.advance();
+                // Optional type annotation: name: type
+                let ann = if *self.peek_raw() == Token::Colon {
+                    if param_is_dyn {
+                        return Err(format!("'dyn' and type annotation on '{param_name}' are incompatible"));
+                    }
+                    self.try_parse_type_annotation()?
+                } else {
+                    None
+                };
+                params.push((param_name, ann, param_is_dyn));
+            } else {
+                // Not a param — bail, this isn't a fn def
+                self.pos = saved_pos;
+                return Ok(None);
+            }
+
+            // Expect comma or RParen
+            if *self.peek_raw() == Token::Comma {
+                self.advance();
+            }
+        }
+
+        // Optional return type annotation after ')': ): type
+        let return_type_ann = if *self.peek_raw() == Token::Colon {
+            self.try_parse_type_annotation()?
+        } else {
+            None
+        };
+
+        // Now skip newlines and check for Indent
+        self.skip_newlines();
+        if *self.peek_raw() != Token::Indent {
+            // Not a function definition — restore and let normal expression parse handle it
+            self.pos = saved_pos;
+            return Ok(None);
+        }
+        self.advance(); // consume Indent
+
+        let body = self.parse_block()?;
+
+        // Validate: either ALL returns are `dyn return` or NONE
+        validate_dyn_returns(&name, &body)?;
+
+        Ok(Some(Stmt {
+            kind: StmtKind::FnDef { name, params, optional_params, return_type_ann, body },
+            span,
+        }))
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, String> {
@@ -360,7 +514,7 @@ impl<'a> StmtParser<'a> {
             _ => Some(self.parse_expression()?),
         };
 
-        Ok(Stmt { kind: StmtKind::Return(value), span })
+        Ok(Stmt { kind: StmtKind::Return { expr: value, is_dyn: false }, span })
     }
 
     fn parse_import(&mut self) -> Result<Stmt, String> {
@@ -406,14 +560,10 @@ impl<'a> StmtParser<'a> {
                     break;
                 }
                 _ => {
-                    // Parse pattern: _ for wildcard, or an expression
-                    let pattern = if let Token::Ident(ref name) = self.peek_raw().clone() {
-                        if name == "_" {
-                            self.advance();
-                            None
-                        } else {
-                            Some(self.parse_expression()?)
-                        }
+                    // Parse pattern: `default` for catch-all, or an expression
+                    let pattern = if *self.peek_raw() == Token::Default {
+                        self.advance();
+                        None
                     } else {
                         Some(self.parse_expression()?)
                     };
@@ -516,6 +666,79 @@ impl<'a> StmtParser<'a> {
         Ok(Stmt { kind: StmtKind::Throw(expr), span })
     }
 
+    fn parse_alias(&mut self) -> Result<Stmt, String> {
+        let span = self.peek_span();
+        self.advance(); // consume 'alias'
+
+        let name = if let Token::Ident(name) = self.peek_raw().clone() {
+            self.advance();
+            name
+        } else {
+            return Err(format!("Expected identifier after 'alias', got {:?}", self.peek_raw()));
+        };
+
+        if *self.peek_raw() != Token::Assign {
+            return Err(format!("Expected '=' after alias name, got {:?}", self.peek_raw()));
+        }
+        self.advance(); // consume '='
+
+        if let Token::String(parts) = self.peek_raw().clone() {
+            self.advance();
+            if parts.len() == 1
+                && let crate::lexer::token::StringPart::Literal(target) = &parts[0]
+            {
+                return Ok(Stmt { kind: StmtKind::Alias { name, target: target.clone() }, span });
+            }
+            Err("Alias target must be a simple string literal".to_string())
+        } else {
+            Err(format!("Expected string after '=', got {:?}", self.peek_raw()))
+        }
+    }
+
+    fn parse_dyn(&mut self) -> Result<Stmt, String> {
+        let span = self.peek_span();
+        self.advance(); // consume 'dyn'
+
+        match self.peek_raw().clone() {
+            Token::Return => {
+                self.advance(); // consume 'return'
+                let value = match self.peek_raw() {
+                    Token::Newline | Token::Dedent | Token::Eof | Token::Semicolon => None,
+                    _ => Some(self.parse_expression()?),
+                };
+                Ok(Stmt { kind: StmtKind::Return { expr: value, is_dyn: true }, span })
+            }
+            Token::Ident(name) => {
+                self.advance(); // consume ident
+
+                // Type annotation — incompatible with dyn
+                if *self.peek_raw() == Token::Colon {
+                    return Err(format!("'dyn' and type annotation on '{name}' are incompatible"));
+                }
+                let type_ann: Option<TypeAnnotation> = None;
+
+                // Error-tolerant
+                let error_tolerant = if *self.peek_raw() == Token::Question {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
+
+                if *self.peek_raw() != Token::Assign {
+                    return Err(format!("Expected '=' after 'dyn {name}'"));
+                }
+                self.advance();
+                let expr = self.parse_expression()?;
+                Ok(Stmt {
+                    kind: StmtKind::Assign { name, error_tolerant, type_ann, is_dyn: true, expr },
+                    span,
+                })
+            }
+            other => Err(format!("Expected identifier or 'return' after 'dyn', got {other:?}")),
+        }
+    }
+
     fn parse_use(&mut self) -> Result<Stmt, String> {
         let span = self.peek_span();
         self.advance(); // consume 'use'
@@ -555,11 +778,111 @@ impl<'a> StmtParser<'a> {
         }
     }
 
+    /// Attempt to parse an optional type annotation: `: type` or `: { field: type, ... }`.
+    /// Only consumes tokens if a valid annotation is found.
+    /// Returns `None` if there is no `:` at the current position.
+    fn try_parse_type_annotation(&mut self) -> Result<Option<TypeAnnotation>, String> {
+        if *self.peek_raw() != Token::Colon {
+            return Ok(None);
+        }
+        self.advance(); // consume ':'
+
+        // Object shape annotation: { field: type, ... }
+        if *self.peek_raw() == Token::LBrace {
+            self.advance(); // consume '{'
+            let mut fields = Vec::new();
+            loop {
+                if *self.peek_raw() == Token::RBrace {
+                    self.advance();
+                    break;
+                }
+                let field_name = if let Token::Ident(n) = self.peek_raw().clone() {
+                    self.advance();
+                    n
+                } else {
+                    return Err(format!(
+                        "Expected field name in object type annotation, got {:?}",
+                        self.peek_raw()
+                    ));
+                };
+                if *self.peek_raw() != Token::Colon {
+                    return Err(format!(
+                        "Expected ':' after field name '{}' in object type annotation, got {:?}",
+                        field_name, self.peek_raw()
+                    ));
+                }
+                self.advance(); // consume ':'
+                let type_name = if let Token::Ident(t) = self.peek_raw().clone() {
+                    self.advance();
+                    t
+                } else {
+                    return Err(format!(
+                        "Expected type name in object type annotation, got {:?}",
+                        self.peek_raw()
+                    ));
+                };
+                fields.push((field_name, type_name));
+                if *self.peek_raw() == Token::Comma {
+                    self.advance();
+                }
+            }
+            return Ok(Some(TypeAnnotation::Object(fields)));
+        }
+
+        // Simple type annotation: ident
+        if let Token::Ident(type_name) = self.peek_raw().clone() {
+            self.advance();
+            return Ok(Some(TypeAnnotation::Simple(type_name)));
+        }
+
+        Err(format!(
+            "Expected type name after ':', got {:?}",
+            self.peek_raw()
+        ))
+    }
+
     fn parse_expression(&mut self) -> Result<Expr, String> {
         let mut ep = ExprParser::new(self.tokens, self.pos);
         let expr = ep.parse_expr(0)?;
         self.pos = ep.pos();
         Ok(expr)
+    }
+}
+
+/// Walk a function body recursively and ensure all returns are either `dyn` or none are.
+fn validate_dyn_returns(fn_name: &str, stmts: &[Stmt]) -> Result<(), String> {
+    let mut has_dyn = false;
+    let mut has_plain = false;
+    collect_returns(stmts, &mut has_dyn, &mut has_plain);
+    if has_dyn && has_plain {
+        return Err(format!(
+            "Function '{fn_name}': mixing 'dyn return' and 'return' is not allowed. All returns must be 'dyn return' or none."
+        ));
+    }
+    Ok(())
+}
+
+fn collect_returns(stmts: &[Stmt], has_dyn: &mut bool, has_plain: &mut bool) {
+    for stmt in stmts {
+        match &stmt.kind {
+            StmtKind::Return { is_dyn: true, .. } => *has_dyn = true,
+            StmtKind::Return { is_dyn: false, .. } => *has_plain = true,
+            StmtKind::If { body, else_body, .. } => {
+                collect_returns(body, has_dyn, has_plain);
+                if let Some(eb) = else_body {
+                    collect_returns(eb, has_dyn, has_plain);
+                }
+            }
+            StmtKind::While { body, .. } | StmtKind::For { body, .. } => {
+                collect_returns(body, has_dyn, has_plain);
+            }
+            StmtKind::Match { arms, .. } => {
+                for arm in arms {
+                    collect_returns(&arm.body, has_dyn, has_plain);
+                }
+            }
+            _ => {}
+        }
     }
 }
 

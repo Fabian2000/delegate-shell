@@ -8,8 +8,17 @@ use std::io::BufReader;
 use std::fs::File;
 use indexmap::IndexMap;
 
-pub type SharedList = Rc<RefCell<Vec<Value>>>;
-pub type SharedObject = Rc<RefCell<IndexMap<String, Value>>>;
+use std::collections::HashSet;
+
+pub(crate) type SharedList = Rc<RefCell<Vec<Value>>>;
+pub(crate) type SharedObject = Rc<RefCell<ObjectData>>;
+
+#[derive(Debug, Clone)]
+pub struct ObjectData {
+    pub fields: IndexMap<String, Value>,
+    /// Fields marked as `dyn` — skip type check when Void, normal check when set
+    pub dyn_fields: HashSet<String>,
+}
 
 #[inline]
 #[must_use]
@@ -20,7 +29,13 @@ pub fn new_list(items: Vec<Value>) -> Value {
 #[inline]
 #[must_use]
 pub fn new_object(map: IndexMap<String, Value>) -> Value {
-    Value::Object(Rc::new(RefCell::new(map)))
+    Value::Object(Rc::new(RefCell::new(ObjectData { fields: map, dyn_fields: HashSet::new() })))
+}
+
+#[inline]
+#[must_use]
+pub fn new_object_with_dyn(map: IndexMap<String, Value>, dyn_fields: HashSet<String>) -> Value {
+    Value::Object(Rc::new(RefCell::new(ObjectData { fields: map, dyn_fields })))
 }
 
 /// A thread-safe version of Value for passing between threads.
@@ -67,7 +82,7 @@ impl fmt::Debug for AtomicValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Int(a) => write!(f, "Atomic({})", a.load(Ordering::SeqCst)),
-            Self::General(m) => write!(f, "Atomic({:?})", m.lock().unwrap()),
+            Self::General(m) => write!(f, "Atomic({:?})", m.lock().unwrap_or_else(|e| e.into_inner())),
         }
     }
 }
@@ -88,7 +103,7 @@ impl AtomicValue {
     pub fn load(&self) -> Value {
         match self {
             Self::Int(a) => Value::Int(a.load(Ordering::SeqCst)),
-            Self::General(m) => Value::from_sendable(m.lock().unwrap().clone()),
+            Self::General(m) => Value::from_sendable(m.lock().unwrap_or_else(|e| e.into_inner()).clone()),
         }
     }
 
@@ -98,7 +113,7 @@ impl AtomicValue {
     pub fn store(&self, val: &Value) {
         match (self, val) {
             (Self::Int(a), Value::Int(n)) => { a.store(*n, Ordering::SeqCst); }
-            (Self::General(m), _) => { *m.lock().unwrap() = val.to_sendable(); }
+            (Self::General(m), _) => { *m.lock().unwrap_or_else(|e| e.into_inner()) = val.to_sendable(); }
             _ => {} // type mismatch silently ignored — runtime checks elsewhere
         }
     }
@@ -163,6 +178,29 @@ pub struct ErrorInfo {
 }
 
 impl Value {
+    // --- Convenience constructors for external API ---
+
+    /// Create a string value.
+    pub fn string(s: &str) -> Self {
+        Self::String(Rc::from(s))
+    }
+
+    /// Create a list value from items.
+    pub fn list(items: Vec<Value>) -> Self {
+        new_list(items)
+    }
+
+    /// Create an object from key-value pairs.
+    pub fn object<const N: usize>(fields: [(&str, Value); N]) -> Self {
+        let mut map = IndexMap::new();
+        for (k, v) in fields {
+            map.insert(k.to_string(), v);
+        }
+        new_object(map)
+    }
+
+    // --- Type introspection ---
+
     #[must_use]
     pub const fn type_name(&self) -> &'static str {
         match self {
@@ -190,7 +228,7 @@ impl Value {
             Self::String(s) => SendableValue::String((*s).to_string()),
             Self::Bool(b) => SendableValue::Bool(*b),
             Self::List(l) => SendableValue::List(l.borrow().iter().map(Self::to_sendable).collect()),
-            Self::Object(m) => SendableValue::Object(m.borrow().iter().map(|(k, v)| (k.clone(), v.to_sendable())).collect()),
+            Self::Object(m) => SendableValue::Object(m.borrow().fields.iter().map(|(k, v)| (k.clone(), v.to_sendable())).collect()),
             Self::Void | Self::ThreadHandle(_) | Self::FileHandle(_) => SendableValue::Void,
             Self::Lambda { name, resolution, bound_args } => SendableValue::Lambda {
                 name: name.clone(), resolution: *resolution,
@@ -258,7 +296,7 @@ impl fmt::Display for Value {
             Self::Object(map) => {
                 let map = map.borrow();
                 write!(f, "{{ ")?;
-                for (i, (k, v)) in map.iter().enumerate() {
+                for (i, (k, v)) in map.fields.iter().enumerate() {
                     if i > 0 { write!(f, ", ")?; }
                     write!(f, "{k} = {v}")?;
                 }

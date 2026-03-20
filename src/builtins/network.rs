@@ -2,15 +2,14 @@ use std::rc::Rc;
 use indexmap::IndexMap;
 use crate::interpreter::value::{Value, new_object};
 use std::io::Read;
+use super::registry::{BuiltinRegistry, Param, Type};
 
-pub fn builtin_http_get(args: &[Value]) -> Result<Value, String> {
-    if args.is_empty() || args.len() > 2 {
-        return Err(format!("http_get() expects 1-2 args, got {}", args.len()));
-    }
-    let url = expect_str("http_get", &args[0])?;
+fn http_get(args: &[Value]) -> Result<Value, String> {
+    let Value::String(url) = &args[0] else { unreachable!() };
     let agent = ureq::Agent::new_with_defaults();
-    let mut req = agent.get(url);
-    if let Some(hdrs) = args.get(1).and_then(extract_headers) {
+    let mut req = agent.get(&**url);
+    if args.len() == 2
+        && let Some(hdrs) = extract_headers(&args[1]) {
         for (k, v) in hdrs {
             if let Value::String(val) = v { req = req.header(k, &*val); }
         }
@@ -20,15 +19,13 @@ pub fn builtin_http_get(args: &[Value]) -> Result<Value, String> {
     Ok(body_response(resp))
 }
 
-pub fn builtin_http_post(args: &[Value]) -> Result<Value, String> {
-    if args.len() < 2 || args.len() > 3 {
-        return Err(format!("http_post() expects 2-3 args, got {}", args.len()));
-    }
-    let url = expect_str("http_post", &args[0])?;
-    let body = expect_str("http_post", &args[1])?;
+fn http_post(args: &[Value]) -> Result<Value, String> {
+    let Value::String(url) = &args[0] else { unreachable!() };
+    let Value::String(body) = &args[1] else { unreachable!() };
     let agent = ureq::Agent::new_with_defaults();
-    let mut req = agent.post(url).header("Content-Type", "application/json");
-    if let Some(hdrs) = args.get(2).and_then(extract_headers) {
+    let mut req = agent.post(&**url).header("Content-Type", "application/json");
+    if args.len() == 3
+        && let Some(hdrs) = extract_headers(&args[2]) {
         for (k, v) in hdrs {
             if let Value::String(val) = v { req = req.header(k, &*val); }
         }
@@ -38,15 +35,13 @@ pub fn builtin_http_post(args: &[Value]) -> Result<Value, String> {
     Ok(body_response(resp))
 }
 
-pub fn builtin_http_put(args: &[Value]) -> Result<Value, String> {
-    if args.len() < 2 || args.len() > 3 {
-        return Err(format!("http_put() expects 2-3 args, got {}", args.len()));
-    }
-    let url = expect_str("http_put", &args[0])?;
-    let body = expect_str("http_put", &args[1])?;
+fn http_put(args: &[Value]) -> Result<Value, String> {
+    let Value::String(url) = &args[0] else { unreachable!() };
+    let Value::String(body) = &args[1] else { unreachable!() };
     let agent = ureq::Agent::new_with_defaults();
-    let mut req = agent.put(url).header("Content-Type", "application/json");
-    if let Some(hdrs) = args.get(2).and_then(extract_headers) {
+    let mut req = agent.put(&**url).header("Content-Type", "application/json");
+    if args.len() == 3
+        && let Some(hdrs) = extract_headers(&args[2]) {
         for (k, v) in hdrs {
             if let Value::String(val) = v { req = req.header(k, &*val); }
         }
@@ -56,14 +51,12 @@ pub fn builtin_http_put(args: &[Value]) -> Result<Value, String> {
     Ok(body_response(resp))
 }
 
-pub fn builtin_http_delete(args: &[Value]) -> Result<Value, String> {
-    if args.is_empty() || args.len() > 2 {
-        return Err(format!("http_delete() expects 1-2 args, got {}", args.len()));
-    }
-    let url = expect_str("http_delete", &args[0])?;
+fn http_delete(args: &[Value]) -> Result<Value, String> {
+    let Value::String(url) = &args[0] else { unreachable!() };
     let agent = ureq::Agent::new_with_defaults();
-    let mut req = agent.delete(url);
-    if let Some(hdrs) = args.get(1).and_then(extract_headers) {
+    let mut req = agent.delete(&**url);
+    if args.len() == 2
+        && let Some(hdrs) = extract_headers(&args[1]) {
         for (k, v) in hdrs {
             if let Value::String(val) = v { req = req.header(k, &*val); }
         }
@@ -73,31 +66,23 @@ pub fn builtin_http_delete(args: &[Value]) -> Result<Value, String> {
     Ok(body_response(resp))
 }
 
-pub fn builtin_download(args: &[Value]) -> Result<Value, String> {
-    if args.len() != 2 {
-        return Err(format!("download() expects 2 args, got {}", args.len()));
-    }
-    let url = expect_str("download", &args[0])?;
-    let path = expect_str("download", &args[1])?;
+fn download(args: &[Value]) -> Result<Value, String> {
+    let Value::String(url) = &args[0] else { unreachable!() };
+    let Value::String(path) = &args[1] else { unreachable!() };
     let resp = ureq::Agent::new_with_defaults()
-        .get(url)
+        .get(&**url)
         .call()
         .map_err(|e| format!("download('{url}'): {e}"))?;
     let mut bytes = Vec::new();
     resp.into_body().as_reader().read_to_end(&mut bytes)
         .map_err(|e| format!("download('{url}'): read error: {e}"))?;
-    std::fs::write(path, &bytes)
+    std::fs::write(&**path, &bytes)
         .map_err(|e| format!("download() write '{path}': {e}"))?;
     Ok(Value::Void)
 }
 
-pub fn builtin_hostname(_args: &[Value]) -> Value {
-    let name = hostname::get()
-        .map_or_else(|_| "unknown".to_string(), |n| n.to_string_lossy().to_string());
-    Value::String(Rc::from(name))
-}
-
-pub fn builtin_ip(_args: &[Value]) -> Result<Value, String> {
+fn ip(args: &[Value]) -> Result<Value, String> {
+    let _ = args;
     let socket = std::net::UdpSocket::bind("0.0.0.0:0")
         .map_err(|e| format!("ip(): {e}"))?;
     socket.connect("8.8.8.8:80")
@@ -114,17 +99,27 @@ fn body_response(resp: ureq::http::Response<ureq::Body>) -> Value {
     let body_str = resp.into_body().read_to_string()
         .unwrap_or_default();
     let mut obj = IndexMap::new();
-    #[expect(clippy::cast_lossless)]
-    obj.insert("status".to_string(), Value::Int(status as i64));
+    obj.insert("status".to_string(), Value::Int(i64::from(status)));
     obj.insert("body".to_string(), Value::String(Rc::from(body_str)));
     new_object(obj)
 }
 
 fn extract_headers(val: &Value) -> Option<IndexMap<String, Value>> {
-    if let Value::Object(rc) = val { Some(rc.borrow().clone()) } else { None }
+    if let Value::Object(rc) = val { Some(rc.borrow().fields.clone()) } else { None }
 }
 
-fn expect_str<'a>(name: &str, val: &'a Value) -> Result<&'a str, String> {
-    if let Value::String(s) = val { Ok(&**s) }
-    else { Err(format!("{name}() expects string, got {}", val.type_name())) }
+pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
+    reg.add("http_get", &[Param::Required(Type::String), Param::Optional(Type::Object)], Type::Object, http_get)?;
+    reg.add("http_post", &[Param::Required(Type::String), Param::Required(Type::String), Param::Optional(Type::Object)], Type::Object, http_post)?;
+    reg.add("http_put", &[Param::Required(Type::String), Param::Required(Type::String), Param::Optional(Type::Object)], Type::Object, http_put)?;
+    reg.add("http_delete", &[Param::Required(Type::String), Param::Optional(Type::Object)], Type::Object, http_delete)?;
+    reg.add("download", &[Param::Required(Type::String), Param::Required(Type::String)], Type::Void, download)?;
+    reg.add("hostname", &[], Type::String, |_args| {
+        let name = hostname::get()
+            .map_or_else(|_| "unknown".to_string(), |n| n.to_string_lossy().to_string());
+        Ok(Value::String(Rc::from(name)))
+    })?;
+    reg.add("ip", &[], Type::String, ip)?;
+
+    Ok(())
 }

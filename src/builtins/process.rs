@@ -1,9 +1,19 @@
 use std::rc::Rc;
 use indexmap::IndexMap;
 use crate::interpreter::value::{Value, new_list, new_object};
-use super::expect_args;
+use super::registry::{BuiltinRegistry, Param, Type};
 
-pub fn builtin_get_processes(_args: &[Value]) -> Result<Value, String> {
+pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
+    reg.add("get_processes", &[], Type::List, builtin_get_processes)?;
+    reg.add("get_process_by_name", &[Param::Required(Type::String)], Type::List, builtin_get_process_by_name)?;
+    reg.add("get_process_by_id", &[Param::Required(Type::Int)], Type::Dyn, builtin_get_process_by_id)?;
+    reg.add("kill_process", &[Param::Required(Type::Dyn)], Type::Bool, builtin_kill_process)?;
+    reg.add("is_process_running", &[Param::Required(Type::Dyn)], Type::Bool, builtin_is_process_running)?;
+
+    Ok(())
+}
+
+fn builtin_get_processes(_args: &[Value]) -> Result<Value, String> {
     let mut procs = Vec::new();
 
     #[cfg(unix)]
@@ -49,39 +59,28 @@ pub fn builtin_get_processes(_args: &[Value]) -> Result<Value, String> {
     Ok(new_list(procs))
 }
 
-pub fn builtin_get_process_by_name(args: &[Value]) -> Result<Value, String> {
-    expect_args("get_process_by_name", args, 1)?;
-    let search = if let Value::String(s) = &args[0] {
-        s.to_ascii_lowercase()
-    } else {
-        return Err(format!("get_process_by_name() expects string, got {}", args[0].type_name()));
-    };
+fn builtin_get_process_by_name(args: &[Value]) -> Result<Value, String> {
+    let Value::String(search) = &args[0] else { unreachable!() };
+    let search = search.to_ascii_lowercase();
 
     let all = builtin_get_processes(&[])?;
-    if let Value::List(list) = all {
-        let list = list.borrow();
-        let mut results = Vec::new();
-        for proc in list.iter() {
-            if let Value::Object(rc) = proc
-                && let Some(Value::String(name)) = rc.borrow().get("name").cloned()
-                && name.to_ascii_lowercase().contains(&search)
-            {
-                results.push(proc.clone());
-            }
+    let Value::List(list) = all else { unreachable!() };
+    let list = list.borrow();
+    let mut results = Vec::new();
+    for proc in list.iter() {
+        if let Value::Object(rc) = proc
+            && let Some(Value::String(name)) = rc.borrow().fields.get("name").cloned()
+            && name.to_ascii_lowercase().contains(&search)
+        {
+            results.push(proc.clone());
         }
-        Ok(new_list(results))
-    } else {
-        Ok(new_list(vec![]))
     }
+    Ok(new_list(results))
 }
 
-pub fn builtin_get_process_by_id(args: &[Value]) -> Result<Value, String> {
-    expect_args("get_process_by_id", args, 1)?;
-    let pid = if let Value::Int(n) = &args[0] {
-        *n
-    } else {
-        return Err(format!("get_process_by_id() expects int, got {}", args[0].type_name()));
-    };
+fn builtin_get_process_by_id(args: &[Value]) -> Result<Value, String> {
+    let Value::Int(pid) = &args[0] else { unreachable!() };
+    let pid = *pid;
 
     #[cfg(unix)]
     {
@@ -94,8 +93,7 @@ pub fn builtin_get_process_by_id(args: &[Value]) -> Result<Value, String> {
     Err(format!("Process with id {pid} not found"))
 }
 
-pub fn builtin_kill_process(args: &[Value]) -> Result<Value, String> {
-    expect_args("kill_process", args, 1)?;
+fn builtin_kill_process(args: &[Value]) -> Result<Value, String> {
     let pid = extract_pid(&args[0])?;
 
     #[cfg(unix)]
@@ -122,8 +120,7 @@ pub fn builtin_kill_process(args: &[Value]) -> Result<Value, String> {
     Err("kill_process() not supported on this platform".to_string())
 }
 
-pub fn builtin_is_process_running(args: &[Value]) -> Result<Value, String> {
-    expect_args("is_process_running", args, 1)?;
+fn builtin_is_process_running(args: &[Value]) -> Result<Value, String> {
     let pid = extract_pid(&args[0])?;
 
     #[cfg(unix)]
@@ -153,7 +150,7 @@ fn extract_pid(val: &Value) -> Result<i64, String> {
     match val {
         Value::Int(n) => Ok(*n),
         Value::Object(rc) => {
-            if let Some(Value::Int(pid)) = rc.borrow().get("id").cloned() {
+            if let Some(Value::Int(pid)) = rc.borrow().fields.get("id").cloned() {
                 Ok(pid)
             } else {
                 Err("Process object has no 'id' field".to_string())
