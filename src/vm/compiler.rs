@@ -99,6 +99,18 @@ impl Compiler {
                     self.chunk.emit_u16(Op::RecordError, err_name_idx, line);
                     self.chunk.patch_jump(end_jump);
                 } else {
+                    // Optimization: x = x + expr → StringAppendLocal (avoids Rc clone overhead)
+                    if let ExprKind::BinaryOp { left, op: BinOp::Add, right } = &expr.kind {
+                        if let ExprKind::Ident(ref lhs_name) = left.kind {
+                            if lhs_name.eq_ignore_ascii_case(name) {
+                                if let Some(slot) = self.resolve_local(name) {
+                                    self.compile_expr(right)?;
+                                    self.chunk.emit_u16(Op::StringAppendLocal, slot, line);
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
                     self.compile_expr(expr)?;
                     self.set_variable(name, line);
                 }
@@ -766,6 +778,12 @@ impl Compiler {
                     if *op == CompoundOp::Add { Op::CompoundAddInt } else { Op::CompoundSubInt },
                     slot, line
                 );
+                return Ok(());
+            }
+            // Superinstruction: string += expr (in-place append)
+            if *op == CompoundOp::Add {
+                self.compile_expr(expr)?;
+                self.chunk.emit_u16(Op::StringAppendLocal, slot, line);
                 return Ok(());
             }
         }

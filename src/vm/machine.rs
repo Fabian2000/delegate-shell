@@ -328,6 +328,29 @@ impl VM {
                             if let Some(v) = self.stack.last_mut() { *v = Value::int(r); }
                             continue;
                         }
+                        // String fast path: take left operand to get sole ownership for in-place append
+                        if self.stack[len-2].is_string() && self.stack[len-1].is_string() {
+                            let b = self.stack.pop().unwrap();
+                            // Take the left value out, replacing with void (refcount decrements by 0)
+                            let mut a = std::mem::replace(self.stack.last_mut().unwrap(), Value::void());
+                            if let Some(b_str) = b.as_str_ref() {
+                                if a.try_string_append_in_place(b_str) {
+                                    *self.stack.last_mut().unwrap() = a;
+                                    continue;
+                                }
+                                // Fallback: allocate with capacity
+                                if let Some(a_str) = a.as_str_ref() {
+                                    let mut s = String::with_capacity(a_str.len() + b_str.len());
+                                    s.push_str(a_str);
+                                    s.push_str(b_str);
+                                    *self.stack.last_mut().unwrap() = Value::string_owned(s);
+                                    continue;
+                                }
+                            }
+                            // Should not reach here, but just in case
+                            *self.stack.last_mut().unwrap() = generic_add(a, b)?;
+                            continue;
+                        }
                     }
                     self.binary_op(|a, b| generic_add(a, b))?;
                 }
@@ -468,6 +491,39 @@ impl VM {
                     let idx = base!() + slot;
                     if let Some(n) = self.stack[idx].as_int() {
                         self.stack[idx] = Value::int(n - rhs);
+                    }
+                }
+                Op::StringAppendLocal => {
+                    let slot = read_u16!() as usize;
+                    let rhs = self.stack.pop().ok_or("VM: stack underflow")?;
+                    let idx = base!() + slot;
+                    // String + String fast path: take value from slot for sole ownership
+                    if self.stack[idx].is_string() && rhs.is_string() {
+                        if let Some(rhs_str) = rhs.as_str_ref() {
+                            // Take value out of local slot to get refcount 1
+                            let mut local_val = std::mem::replace(&mut self.stack[idx], Value::void());
+                            if local_val.try_string_append_in_place(rhs_str) {
+                                self.stack[idx] = local_val;
+                                continue;
+                            }
+                            // Fallback: allocate with capacity
+                            if let Some(a_str) = local_val.as_str_ref() {
+                                let mut s = String::with_capacity(a_str.len() + rhs_str.len());
+                                s.push_str(a_str);
+                                s.push_str(rhs_str);
+                                self.stack[idx] = Value::string_owned(s);
+                                continue;
+                            }
+                            // Put it back if somehow not a string
+                            self.stack[idx] = local_val;
+                        }
+                    }
+                    // Fallback: int + int or other type combinations
+                    if let (Some(a), Some(b)) = (self.stack[idx].as_int(), rhs.as_int()) {
+                        self.stack[idx] = Value::int(a + b);
+                    } else {
+                        let a = std::mem::replace(&mut self.stack[idx], Value::void());
+                        self.stack[idx] = generic_add(a, rhs)?;
                     }
                 }
                 Op::PostIncLocal => {
@@ -741,14 +797,14 @@ impl VM {
                 }
                 Op::FieldGet => {
                     let idx = read_u16!();
-                    let field = self.chunks[ci!()].constants.get(idx).clone();
+                    let field: &str = self.chunks[ci!()].constants.get(idx);
                     let obj = self.stack.pop().ok_or("VM: stack underflow")?;
                     if let Some(rc) = obj.as_object_ref() {
-                        let val = rc.borrow().fields.get(field.as_ref()).cloned()
+                        let val = rc.borrow().fields.get(field).cloned()
                             .ok_or_else(|| format!("Field '{field}' not found"))?;
                         self.stack.push(val);
                     } else if let Some(data) = obj.as_command_result() {
-                        match field.as_ref() {
+                        match field {
                             "status" => self.stack.push(Value::int(i64::from(data.status))),
                             "out" => self.stack.push(Value::string_from(&data.out)),
                             "err" => self.stack.push(Value::string_from(&data.err)),
@@ -761,12 +817,14 @@ impl VM {
                 Op::MakeString => {
                     let count = read_u16!() as usize;
                     let start = self.stack.len() - count;
-                    let parts: Vec<Value> = self.stack.drain(start..).collect();
+                    // Build string directly from stack slice — no Vec allocation
                     let mut result = String::new();
-                    for part in &parts {
-                        result.push_str(&format!("{part}"));
+                    for i in start..start + count {
+                        use std::fmt::Write;
+                        let _ = write!(result, "{}", self.stack[i]);
                     }
-                    self.stack.push(Value::string(Rc::from(result)));
+                    self.stack.truncate(start);
+                    self.stack.push(Value::string_owned(result));
                 }
                 Op::MakeRange => {
                     let end = self.pop_int()?;
@@ -1006,7 +1064,7 @@ impl VM {
                 }
                 Op::FieldSet => {
                     let field_idx = read_u16!();
-                    let field = self.chunks[ci!()].constants.get(field_idx).clone();
+                    let field: &str = self.chunks[ci!()].constants.get(field_idx);
                     let val = self.stack.pop().ok_or("VM: stack underflow")?;
                     let target = self.stack.pop().ok_or("VM: stack underflow")?;
                     if let Some(rc) = target.as_object_ref() {
@@ -1266,7 +1324,7 @@ impl VM {
 
 // --- Helpers ---
 
-fn values_equal(a: &Value, b: &Value) -> bool {
+pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
     match (a.kind(), b.kind()) {
         (VK::Int(x), VK::Int(y)) => x == y,
         (VK::Float(x), VK::Float(y)) => (x - y).abs() < f64::EPSILON,
@@ -1277,18 +1335,38 @@ fn values_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
-fn generic_add(a: Value, b: Value) -> Result<Value, String> {
+pub(crate) fn generic_add(mut a: Value, b: Value) -> Result<Value, String> {
+    // Fast path: try in-place string append when left operand is uniquely owned
+    if a.is_string() && b.is_string() {
+        if let Some(b_str) = b.as_str_ref() {
+            if a.try_string_append_in_place(b_str) {
+                return Ok(a);
+            }
+            // Fallback: allocate new string with pre-sized capacity
+            if let Some(a_str) = a.as_str_ref() {
+                let mut s = String::with_capacity(a_str.len() + b_str.len());
+                s.push_str(a_str);
+                s.push_str(b_str);
+                return Ok(Value::string_owned(s));
+            }
+        }
+    }
     match (a.kind(), b.kind()) {
         (VK::Int(x), VK::Int(y)) => Ok(Value::int(x + y)),
         (VK::Float(x), VK::Float(y)) => Ok(Value::float(x + y)),
         (VK::Int(x), VK::Float(y)) => Ok(Value::float(x as f64 + y)),
         (VK::Float(x), VK::Int(y)) => Ok(Value::float(x + y as f64)),
-        (VK::String(x), VK::String(y)) => Ok(Value::string(Rc::from(format!("{x}{y}")))),
+        (VK::String(x), VK::String(y)) => {
+            let mut s = String::with_capacity(x.len() + y.len());
+            s.push_str(x);
+            s.push_str(y);
+            Ok(Value::string_owned(s))
+        }
         _ => Err(format!("Cannot add {} and {}", a.type_name(), b.type_name())),
     }
 }
 
-fn generic_sub(a: Value, b: Value) -> Result<Value, String> {
+pub(crate) fn generic_sub(a: Value, b: Value) -> Result<Value, String> {
     match (a.kind(), b.kind()) {
         (VK::Int(x), VK::Int(y)) => Ok(Value::int(x - y)),
         (VK::Float(x), VK::Float(y)) => Ok(Value::float(x - y)),
@@ -1298,7 +1376,7 @@ fn generic_sub(a: Value, b: Value) -> Result<Value, String> {
     }
 }
 
-fn generic_mul(a: Value, b: Value) -> Result<Value, String> {
+pub(crate) fn generic_mul(a: Value, b: Value) -> Result<Value, String> {
     match (a.kind(), b.kind()) {
         (VK::Int(x), VK::Int(y)) => Ok(Value::int(x * y)),
         (VK::Float(x), VK::Float(y)) => Ok(Value::float(x * y)),
@@ -1308,7 +1386,7 @@ fn generic_mul(a: Value, b: Value) -> Result<Value, String> {
     }
 }
 
-fn generic_div(a: Value, b: Value) -> Result<Value, String> {
+pub(crate) fn generic_div(a: Value, b: Value) -> Result<Value, String> {
     match (a.kind(), b.kind()) {
         (VK::Int(x), VK::Int(y)) => {
             if y == 0 { return Err("Division by zero".to_string()); }
@@ -1321,7 +1399,7 @@ fn generic_div(a: Value, b: Value) -> Result<Value, String> {
     }
 }
 
-fn generic_mod(a: Value, b: Value) -> Result<Value, String> {
+pub(crate) fn generic_mod(a: Value, b: Value) -> Result<Value, String> {
     match (a.kind(), b.kind()) {
         (VK::Int(x), VK::Int(y)) => {
             if y == 0 { return Err("Modulo by zero".to_string()); }
@@ -1347,7 +1425,7 @@ fn generic_pow(a: Value, b: Value) -> Result<Value, String> {
     }
 }
 
-fn generic_compare(a: Value, b: Value, pred: impl FnOnce(std::cmp::Ordering) -> bool) -> Result<Value, String> {
+pub(crate) fn generic_compare(a: Value, b: Value, pred: impl FnOnce(std::cmp::Ordering) -> bool) -> Result<Value, String> {
     let ord = match (a.kind(), b.kind()) {
         (VK::Int(x), VK::Int(y)) => x.cmp(&y),
         (VK::Float(x), VK::Float(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
@@ -1419,6 +1497,7 @@ fn patch_global_slots(code: &mut [u8], slot_remap: &std::collections::HashMap<u1
             | Op::MakeObject | Op::MakeString | Op::MakeRange
             | Op::IncLocal | Op::DecLocal | Op::PostIncLocal | Op::PostDecLocal
             | Op::PreIncLocal | Op::PreDecLocal | Op::CompoundAddInt | Op::CompoundSubInt
+            | Op::StringAppendLocal
             | Op::GetDollarIndex | Op::GetDollarField
             | Op::Import | Op::GetLocalInt => pc += 2,
             _ => {} // 0-operand opcodes
@@ -1467,6 +1546,7 @@ fn patch_chunk_indices(code: &mut [u8], offset: u16) {
             | Op::MakeObject | Op::MakeString | Op::MakeRange
             | Op::IncLocal | Op::DecLocal | Op::PostIncLocal | Op::PostDecLocal
             | Op::PreIncLocal | Op::PreDecLocal | Op::CompoundAddInt | Op::CompoundSubInt
+            | Op::StringAppendLocal
             | Op::GetDollarIndex | Op::GetDollarField | Op::ErrorCheck
             | Op::OptionalCheck | Op::SetErrorTolerant | Op::RecordError | Op::Import | Op::Free
             | Op::GetLocalInt => pc += 2,

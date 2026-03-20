@@ -386,21 +386,45 @@ impl Interpreter {
                 }
             }
         }
-        // Fast path: int += int (very common in loops)
+        // Fast path: int += int, string += string (very common in loops)
         if op == CompoundOp::Add {
             let rhs = self.eval_expr(expr)?;
-            if let Some(MaybeError::Ok(current)) = self.env.get(name) {
+            // Determine types first, then drop the borrow
+            let fast_path = if let Some(MaybeError::Ok(current)) = self.env.get(name) {
                 match (current.kind(), rhs.kind()) {
-                    (VK::Int(a), VK::Int(b)) => {
-                        self.env.set(name, MaybeError::Ok(Value::int(a + b)))?;
-                        return Ok(FlowSignal::None);
-                    }
-                    (VK::String(a), VK::String(b)) => {
-                        self.env.set(name, MaybeError::Ok(Value::string_from(&format!("{a}{b}"))))?;
-                        return Ok(FlowSignal::None);
-                    }
-                    _ => {}
+                    (VK::Int(a), VK::Int(b)) => Some((true, a, b)),
+                    (VK::String(_), VK::String(_)) => Some((false, 0, 0)),
+                    _ => None,
                 }
+            } else {
+                None
+            };
+            match fast_path {
+                Some((true, a, b)) => {
+                    self.env.set(name, MaybeError::Ok(Value::int(a + b)))?;
+                    return Ok(FlowSignal::None);
+                }
+                Some((false, _, _)) => {
+                    // String += string: try in-place append
+                    let rhs_str = rhs.as_str_ref().unwrap_or("").to_string();
+                    if let Some(MaybeError::Ok(current_val)) = self.env.get_mut(name) {
+                        if current_val.try_string_append_in_place(&rhs_str) {
+                            return Ok(FlowSignal::None);
+                        }
+                    }
+                    // Fallback: allocate new string
+                    if let Some(MaybeError::Ok(current_val)) = self.env.get(name) {
+                        if let Some(a_str) = current_val.as_str_ref() {
+                            let mut new_s = String::with_capacity(a_str.len() + rhs_str.len());
+                            new_s.push_str(a_str);
+                            new_s.push_str(&rhs_str);
+                            self.env.set(name, MaybeError::Ok(Value::string_owned(new_s)))?;
+                            return Ok(FlowSignal::None);
+                        }
+                    }
+                    return Ok(FlowSignal::None);
+                }
+                None => {}
             }
             let current = self.get_var(name)?;
             let result = Self::apply_binop(&current, BinOp::Add, &rhs)?;
@@ -1261,7 +1285,12 @@ impl Interpreter {
 
             // String concatenation
             (VK::String(a), VK::String(b)) => match op {
-                BinOp::Add => Ok(Value::string_from(&format!("{a}{b}"))),
+                BinOp::Add => {
+                    let mut s = String::with_capacity(a.len() + b.len());
+                    s.push_str(a);
+                    s.push_str(b);
+                    Ok(Value::string_owned(s))
+                }
                 BinOp::Lt => Ok(Value::bool(a < b)),
                 BinOp::Gt => Ok(Value::bool(a > b)),
                 BinOp::LtEq => Ok(Value::bool(a <= b)),

@@ -152,6 +152,17 @@ impl Environment {
         None
     }
 
+    /// Get a mutable reference to a variable — searches from innermost to outermost scope.
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut MaybeError> {
+        let key = to_lower(name);
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(val) = scope.get_mut(key.as_ref()) {
+                return Some(val);
+            }
+        }
+        None
+    }
+
     /// Remove a variable from all scopes. Returns true if found and removed.
     pub fn remove(&mut self, name: &str) -> bool {
         let key = to_lower(name);

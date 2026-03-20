@@ -66,7 +66,7 @@ fn score_chunk(chunk: &Chunk) -> (u32, u32) {
             Op::GetLocal | Op::SetLocal => { jit += 1; pc += 2; continue; }
 
             // Inc/Dec: tight loop patterns
-            Op::IncLocal | Op::DecLocal | Op::CompoundAddInt | Op::CompoundSubInt => { jit += 2; pc += 2; continue; }
+            Op::IncLocal | Op::DecLocal | Op::CompoundAddInt | Op::CompoundSubInt | Op::StringAppendLocal => { jit += 2; pc += 2; continue; }
             Op::PostIncLocal | Op::PostDecLocal | Op::PreIncLocal | Op::PreDecLocal => { jit += 2; pc += 2; continue; }
 
             // Bitwise: native ops

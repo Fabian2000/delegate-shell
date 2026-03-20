@@ -257,11 +257,44 @@ impl Value {
         Self(TAG_STRING | (ptr & PAYLOAD_MASK))
     }
 
+    /// Create a string Value from an owned String, avoiding an extra copy.
+    pub fn string_owned(s: String) -> Self {
+        let rc_string: Rc<String> = Rc::new(s);
+        let ptr = Rc::into_raw(rc_string) as u64;
+        debug_assert!(ptr & !PAYLOAD_MASK == 0, "pointer exceeds 48 bits");
+        Self(TAG_STRING | (ptr & PAYLOAD_MASK))
+    }
+
     /// Create from an existing Rc<String> without extra allocation.
     pub fn string_rc(s: Rc<String>) -> Self {
         let ptr = Rc::into_raw(s) as u64;
         debug_assert!(ptr & !PAYLOAD_MASK == 0, "pointer exceeds 48 bits");
         Self(TAG_STRING | (ptr & PAYLOAD_MASK))
+    }
+
+    /// Try to append `suffix` to this string value in-place (if Rc refcount == 1).
+    /// Returns `true` if the append succeeded in-place, `false` if a new allocation is needed.
+    /// SAFETY: Only call on a value where `is_string()` is true.
+    #[inline]
+    pub fn try_string_append_in_place(&mut self, suffix: &str) -> bool {
+        if self.tag() != TAG_STRING { return false; }
+        let ptr = self.payload() as *mut String;
+        unsafe {
+            // Reconstruct the Rc to check refcount, then forget it
+            let rc = Rc::from_raw(ptr);
+            let is_unique = Rc::strong_count(&rc) == 1;
+            if is_unique {
+                // We are the sole owner — mutate in place via the raw pointer.
+                // We must forget the Rc first to avoid double-free, since `self`
+                // still logically owns it (Drop will free it).
+                std::mem::forget(rc);
+                (*ptr).push_str(suffix);
+                true
+            } else {
+                std::mem::forget(rc);
+                false
+            }
+        }
     }
 
     #[inline]

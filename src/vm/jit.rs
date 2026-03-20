@@ -35,64 +35,54 @@ const BOP_BITXOR: u64 = 13;
 const BOP_SHL: u64 = 14;
 const BOP_SHR: u64 = 15;
 
-/// Generic binary op for ANY types.
+/// Generic binary op for ANY types. Takes ownership of both values.
 unsafe extern "C" fn jit_binary_op(left: u64, right: u64, op_code: u64) -> u64 {
-    unsafe {
-        let l = Value::from_raw(left);
-        let r = Value::from_raw(right);
+    let l = Value::from_raw(left);
+    let r = Value::from_raw(right);
 
-        let result = match op_code {
-            BOP_ADD => generic_add(&l, &r),
-            BOP_SUB => generic_sub(&l, &r),
-            BOP_MUL => generic_mul(&l, &r),
-            BOP_DIV => generic_div(&l, &r),
-            BOP_MOD => generic_mod(&l, &r),
-            BOP_EQ => Ok(Value::bool(values_equal(&l, &r))),
-            BOP_NEQ => Ok(Value::bool(!values_equal(&l, &r))),
-            BOP_LT => generic_compare(&l, &r, |o| o.is_lt()),
-            BOP_GT => generic_compare(&l, &r, |o| o.is_gt()),
-            BOP_LTE => generic_compare(&l, &r, |o| o.is_le()),
-            BOP_GTE => generic_compare(&l, &r, |o| o.is_ge()),
-            BOP_BITAND => {
-                match (l.as_int(), r.as_int()) {
-                    (Some(a), Some(b)) => Ok(Value::int(a & b)),
-                    _ => Err("Bitwise AND requires integers".to_string()),
-                }
-            }
-            BOP_BITOR => {
-                match (l.as_int(), r.as_int()) {
-                    (Some(a), Some(b)) => Ok(Value::int(a | b)),
-                    _ => Err("Bitwise OR requires integers".to_string()),
-                }
-            }
-            BOP_BITXOR => {
-                match (l.as_int(), r.as_int()) {
-                    (Some(a), Some(b)) => Ok(Value::int(a ^ b)),
-                    _ => Err("Bitwise XOR requires integers".to_string()),
-                }
-            }
-            BOP_SHL => {
-                match (l.as_int(), r.as_int()) {
-                    (Some(a), Some(b)) => Ok(Value::int(a << b)),
-                    _ => Err("Shift left requires integers".to_string()),
-                }
-            }
-            BOP_SHR => {
-                match (l.as_int(), r.as_int()) {
-                    (Some(a), Some(b)) => Ok(Value::int(a >> b)),
-                    _ => Err("Shift right requires integers".to_string()),
-                }
-            }
-            _ => Err("Unknown binary op".to_string()),
+    // Eq/Neq need refs, then we drop
+    if op_code == BOP_EQ || op_code == BOP_NEQ {
+        let eq = values_equal(&l, &r);
+        drop(l); drop(r);
+        let v = Value::bool(if op_code == BOP_EQ { eq } else { !eq });
+        let raw = v.raw(); std::mem::forget(v); return raw;
+    }
+
+    // Bitwise ops — extract ints
+    if op_code >= BOP_BITAND {
+        let ai = l.as_int(); let bi = r.as_int();
+        drop(l); drop(r);
+        let v = match (ai, bi) {
+            (Some(a), Some(b)) => match op_code {
+                BOP_BITAND => Value::int(a & b),
+                BOP_BITOR => Value::int(a | b),
+                BOP_BITXOR => Value::int(a ^ b),
+                BOP_SHL => Value::int(a << b),
+                BOP_SHR => Value::int(a >> b),
+                _ => Value::void(),
+            },
+            _ => Value::void(),
         };
+        let raw = v.raw(); std::mem::forget(v); return raw;
+    }
 
-        std::mem::forget(l);
-        std::mem::forget(r);
+    // Arithmetic + comparisons: all consume values
+    let result = match op_code {
+        BOP_ADD => generic_add(l, r),
+        BOP_SUB => generic_sub(l, r),
+        BOP_MUL => generic_mul(l, r),
+        BOP_DIV => generic_div(l, r),
+        BOP_MOD => generic_mod(l, r),
+        BOP_LT => generic_compare(l, r, |o| o.is_lt()),
+        BOP_GT => generic_compare(l, r, |o| o.is_gt()),
+        BOP_LTE => generic_compare(l, r, |o| o.is_le()),
+        BOP_GTE => generic_compare(l, r, |o| o.is_ge()),
+        _ => Ok(Value::void()),
+    };
 
-        match result {
-            Ok(v) => { let raw = v.raw(); std::mem::forget(v); raw }
-            Err(_) => { let v = Value::void(); let raw = v.raw(); std::mem::forget(v); raw }
-        }
+    match result {
+        Ok(v) => { let raw = v.raw(); std::mem::forget(v); raw }
+        Err(_) => Value::void().raw()
     }
 }
 
@@ -147,9 +137,7 @@ unsafe extern "C" fn jit_pow(base: u64, exp: u64) -> u64 {
     unsafe {
         let b = Value::from_raw(base);
         let e = Value::from_raw(exp);
-        let result = generic_pow(&b, &e).unwrap_or_else(|_| Value::void());
-        std::mem::forget(b);
-        std::mem::forget(e);
+        let result = generic_pow(b, e).unwrap_or_else(|_| Value::void());
         let raw = result.raw();
         std::mem::forget(result);
         raw
@@ -260,12 +248,12 @@ unsafe extern "C" fn jit_field_get(obj: u64, chunks_ptr: *const Vec<Chunk>, chun
     unsafe {
         let o = Value::from_raw(obj);
         let chunks = &*chunks_ptr;
-        let field = chunks[chunk_idx as usize].constants.get(field_idx as u16).clone();
+        let field: &str = chunks[chunk_idx as usize].constants.get(field_idx as u16);
 
         let result = if let Some(rc) = o.as_object_ref() {
-            rc.borrow().fields.get(field.as_ref()).cloned().unwrap_or_else(|| Value::void())
+            rc.borrow().fields.get(field).cloned().unwrap_or_else(Value::void)
         } else if let Some(data) = o.as_command_result() {
-            match field.as_ref() {
+            match field {
                 "status" => Value::int(i64::from(data.status)),
                 "out" => Value::string_from(&data.out),
                 "err" => Value::string_from(&data.err),
@@ -288,7 +276,7 @@ unsafe extern "C" fn jit_field_set(obj: u64, chunks_ptr: *const Vec<Chunk>, chun
         let o = Value::from_raw(obj);
         let v = Value::from_raw(val);
         let chunks = &*chunks_ptr;
-        let field = chunks[chunk_idx as usize].constants.get(field_idx as u16).clone();
+        let field: &str = chunks[chunk_idx as usize].constants.get(field_idx as u16);
         let v_cloned = v.clone();
 
         if let Some(rc) = o.as_object_ref() {
@@ -387,7 +375,7 @@ unsafe extern "C" fn jit_make_string(parts_ptr: *const u64, count: u64) -> u64 {
             result_str.push_str(&format!("{v}"));
             std::mem::forget(v);
         }
-        let result = Value::string(Rc::from(result_str));
+        let result = Value::string_owned(result_str);
         let raw = result.raw();
         std::mem::forget(result);
         raw
@@ -595,6 +583,55 @@ unsafe extern "C" fn jit_inc_dec(val: u64, op: u64) -> u64 {
             _ => v.clone(),
         };
         std::mem::forget(v);
+        let raw = result.raw();
+        std::mem::forget(result);
+        raw
+    }
+}
+
+/// String append for a local: local_val + rhs.
+/// Takes ownership of local_val (caller must not forget it); forgets rhs.
+/// If both are strings and local_val has refcount 1, appends in-place.
+unsafe extern "C" fn jit_string_append_local(local_val: u64, rhs: u64) -> u64 {
+    unsafe {
+        let mut lv = Value::from_raw(local_val);
+        let rv = Value::from_raw(rhs);
+        let result = if lv.is_string() && rv.is_string() {
+            if let Some(rhs_str) = rv.as_str_ref() {
+                if lv.try_string_append_in_place(rhs_str) {
+                    std::mem::forget(rv);
+                    let raw = lv.raw();
+                    std::mem::forget(lv);
+                    return raw;
+                }
+                if let Some(a_str) = lv.as_str_ref() {
+                    let mut s = String::with_capacity(a_str.len() + rhs_str.len());
+                    s.push_str(a_str);
+                    s.push_str(rhs_str);
+                    Value::string_owned(s)
+                } else {
+                    lv.clone()
+                }
+            } else {
+                lv.clone()
+            }
+        } else if let (Some(a), Some(b)) = (lv.as_int(), rv.as_int()) {
+            Value::int(a + b)
+        } else {
+            // Generic add
+            match generic_add(&lv, &rv) {
+                Ok(v) => {
+                    std::mem::forget(lv);
+                    std::mem::forget(rv);
+                    let r = v.raw();
+                    std::mem::forget(v);
+                    return r;
+                }
+                Err(_) => lv.clone(),
+            }
+        };
+        std::mem::forget(lv);
+        std::mem::forget(rv);
         let raw = result.raw();
         std::mem::forget(result);
         raw
@@ -916,64 +953,11 @@ unsafe extern "C" fn jit_atomic(val: u64) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// Arithmetic helpers (used by jit_binary_op)
+// Arithmetic helpers — reuse from machine module, only keep JIT-specific ones
 // ---------------------------------------------------------------------------
+use super::machine::{generic_add, generic_sub, generic_mul, generic_div, generic_mod, generic_compare, values_equal};
 
-fn generic_add(a: &Value, b: &Value) -> Result<Value, String> {
-    match (a.kind(), b.kind()) {
-        (VK::Int(x), VK::Int(y)) => Ok(Value::int(x + y)),
-        (VK::Float(x), VK::Float(y)) => Ok(Value::float(x + y)),
-        (VK::Int(x), VK::Float(y)) => Ok(Value::float(x as f64 + y)),
-        (VK::Float(x), VK::Int(y)) => Ok(Value::float(x + y as f64)),
-        (VK::String(x), VK::String(y)) => Ok(Value::string(Rc::from(format!("{x}{y}")))),
-        _ => Err(format!("Cannot add {} and {}", a.type_name(), b.type_name())),
-    }
-}
-
-fn generic_sub(a: &Value, b: &Value) -> Result<Value, String> {
-    match (a.kind(), b.kind()) {
-        (VK::Int(x), VK::Int(y)) => Ok(Value::int(x - y)),
-        (VK::Float(x), VK::Float(y)) => Ok(Value::float(x - y)),
-        (VK::Int(x), VK::Float(y)) => Ok(Value::float(x as f64 - y)),
-        (VK::Float(x), VK::Int(y)) => Ok(Value::float(x - y as f64)),
-        _ => Err(format!("Cannot subtract {} from {}", b.type_name(), a.type_name())),
-    }
-}
-
-fn generic_mul(a: &Value, b: &Value) -> Result<Value, String> {
-    match (a.kind(), b.kind()) {
-        (VK::Int(x), VK::Int(y)) => Ok(Value::int(x * y)),
-        (VK::Float(x), VK::Float(y)) => Ok(Value::float(x * y)),
-        (VK::Int(x), VK::Float(y)) => Ok(Value::float(x as f64 * y)),
-        (VK::Float(x), VK::Int(y)) => Ok(Value::float(x * y as f64)),
-        _ => Err(format!("Cannot multiply {} and {}", a.type_name(), b.type_name())),
-    }
-}
-
-fn generic_div(a: &Value, b: &Value) -> Result<Value, String> {
-    match (a.kind(), b.kind()) {
-        (VK::Int(x), VK::Int(y)) => {
-            if y == 0 { return Err("Division by zero".to_string()); }
-            Ok(Value::int(x / y))
-        }
-        (VK::Float(x), VK::Float(y)) => Ok(Value::float(x / y)),
-        (VK::Int(x), VK::Float(y)) => Ok(Value::float(x as f64 / y)),
-        (VK::Float(x), VK::Int(y)) => Ok(Value::float(x / y as f64)),
-        _ => Err(format!("Cannot divide {} by {}", a.type_name(), b.type_name())),
-    }
-}
-
-fn generic_mod(a: &Value, b: &Value) -> Result<Value, String> {
-    match (a.kind(), b.kind()) {
-        (VK::Int(x), VK::Int(y)) => {
-            if y == 0 { return Err("Modulo by zero".to_string()); }
-            Ok(Value::int(x % y))
-        }
-        _ => Err(format!("Cannot modulo {} by {}", a.type_name(), b.type_name())),
-    }
-}
-
-fn generic_pow(a: &Value, b: &Value) -> Result<Value, String> {
+fn generic_pow(a: Value, b: Value) -> Result<Value, String> {
     match (a.kind(), b.kind()) {
         (VK::Int(base), VK::Int(exp)) => {
             if let Ok(e) = u32::try_from(exp) {
@@ -987,27 +971,6 @@ fn generic_pow(a: &Value, b: &Value) -> Result<Value, String> {
         (VK::Float(x), VK::Int(y)) => Ok(Value::float(x.powf(y as f64))),
         _ => Err(format!("Cannot exponentiate {} by {}", a.type_name(), b.type_name())),
     }
-}
-
-fn values_equal(a: &Value, b: &Value) -> bool {
-    match (a.kind(), b.kind()) {
-        (VK::Int(x), VK::Int(y)) => x == y,
-        (VK::Float(x), VK::Float(y)) => (x - y).abs() < f64::EPSILON,
-        (VK::String(x), VK::String(y)) => x == y,
-        (VK::Bool(x), VK::Bool(y)) => x == y,
-        (VK::Void, VK::Void) => true,
-        _ => false,
-    }
-}
-
-fn generic_compare(a: &Value, b: &Value, pred: impl FnOnce(std::cmp::Ordering) -> bool) -> Result<Value, String> {
-    let ord = match (a.kind(), b.kind()) {
-        (VK::Int(x), VK::Int(y)) => x.cmp(&y),
-        (VK::Float(x), VK::Float(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
-        (VK::String(x), VK::String(y)) => x.cmp(y),
-        _ => return Err(format!("Cannot compare {} and {}", a.type_name(), b.type_name())),
-    };
-    Ok(Value::bool(pred(ord)))
 }
 
 fn vm_index(target: &Value, index: &Value) -> Result<Value, String> {
@@ -1052,6 +1015,7 @@ const H_CALL_BUILTIN: &str = "jit_call_builtin_v2";
 const H_MAKE_LAMBDA: &str = "jit_make_lambda";
 const H_INC_DEC: &str = "jit_inc_dec";
 const H_COMPOUND_OP: &str = "jit_compound_op";
+const H_STRING_APPEND_LOCAL: &str = "jit_string_append_local";
 const H_LOCAL_IMM_OP: &str = "jit_local_imm_op";
 const H_BRANCH_LOCAL_IMM: &str = "jit_branch_local_imm";
 const H_VM_CALL: &str = "jit_vm_call";
@@ -1126,6 +1090,7 @@ impl JitManager {
                 builder.symbol(H_MAKE_LAMBDA, jit_make_lambda as *const u8);
                 builder.symbol(H_INC_DEC, jit_inc_dec as *const u8);
                 builder.symbol(H_COMPOUND_OP, jit_compound_op as *const u8);
+                builder.symbol(H_STRING_APPEND_LOCAL, jit_string_append_local as *const u8);
                 builder.symbol(H_LOCAL_IMM_OP, jit_local_imm_op as *const u8);
                 builder.symbol(H_BRANCH_LOCAL_IMM, jit_branch_local_imm as *const u8);
                 builder.symbol(H_VM_CALL, jit_vm_call as *const u8);
@@ -1307,6 +1272,7 @@ struct HelperRefs {
     make_lambda: cranelift_codegen::ir::FuncRef,   // (i64, i64, i64, i64, i64, i64) -> i64
     inc_dec: cranelift_codegen::ir::FuncRef,       // (i64, i64) -> i64
     compound_op: cranelift_codegen::ir::FuncRef,   // (i64, i64, i64) -> i64
+    string_append_local: cranelift_codegen::ir::FuncRef, // (i64, i64) -> i64
     local_imm_op: cranelift_codegen::ir::FuncRef,  // (i64, i64, i64) -> i64
     branch_local_imm: cranelift_codegen::ir::FuncRef, // (i64, i64, i64) -> i64
     vm_call: cranelift_codegen::ir::FuncRef,       // (i64, i64, i64, i64, i64) -> i64
@@ -1368,6 +1334,7 @@ impl HelperRefs {
             make_lambda: decl!(H_MAKE_LAMBDA, [i64t, i64t, i64t, i64t, i64t, i64t], [i64t]),
             inc_dec: decl!(H_INC_DEC, [i64t, i64t], [i64t]),
             compound_op: decl!(H_COMPOUND_OP, [i64t, i64t, i64t], [i64t]),
+            string_append_local: decl!(H_STRING_APPEND_LOCAL, [i64t, i64t], [i64t]),
             local_imm_op: decl!(H_LOCAL_IMM_OP, [i64t, i64t, i64t], [i64t]),
             branch_local_imm: decl!(H_BRANCH_LOCAL_IMM, [i64t, i64t, i64t], [i64t]),
             vm_call: decl!(H_VM_CALL, [i64t, i64t, i64t, i64t, i64t], [i64t]),
@@ -1463,6 +1430,7 @@ impl GenericJitCompiler {
                     | Op::MakeObject | Op::MakeString | Op::MakeRange
                     | Op::IncLocal | Op::DecLocal | Op::PostIncLocal | Op::PostDecLocal
                     | Op::PreIncLocal | Op::PreDecLocal | Op::CompoundAddInt | Op::CompoundSubInt
+                    | Op::StringAppendLocal
                     | Op::GetDollarIndex | Op::GetDollarField | Op::ErrorCheck
                     | Op::OptionalCheck | Op::SetErrorTolerant | Op::Import | Op::Free
                     | Op::GetLocalInt | Op::RecordError => pc += 2,
@@ -1555,6 +1523,7 @@ impl GenericJitCompiler {
                     | Op::MakeObject | Op::MakeString | Op::MakeRange
                     | Op::IncLocal | Op::DecLocal | Op::PostIncLocal | Op::PostDecLocal
                     | Op::PreIncLocal | Op::PreDecLocal | Op::CompoundAddInt | Op::CompoundSubInt
+                    | Op::StringAppendLocal
                     | Op::GetDollarIndex | Op::GetDollarField | Op::ErrorCheck
                     | Op::OptionalCheck | Op::SetErrorTolerant | Op::Import | Op::Free
                     | Op::GetLocalInt | Op::RecordError => pc += 2,
@@ -1880,6 +1849,14 @@ impl GenericJitCompiler {
                     let v = builder.use_var(vars[slot]);
                     let op_c = builder.ins().iconst(types::I64, 1); // sub
                     let call = builder.ins().call(helpers.compound_op, &[v, rhs, op_c]);
+                    builder.def_var(vars[slot], builder.inst_results(call)[0]);
+                }
+                Op::StringAppendLocal => {
+                    let slot = chunk.read_u16(pc) as usize; pc += 2;
+                    let rhs = match vstack.pop() { Some(v) => v, None => return false };
+                    if slot >= vars.len() { return false; }
+                    let v = builder.use_var(vars[slot]);
+                    let call = builder.ins().call(helpers.string_append_local, &[v, rhs]);
                     builder.def_var(vars[slot], builder.inst_results(call)[0]);
                 }
 

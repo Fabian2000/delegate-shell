@@ -87,6 +87,7 @@ pub enum Op {
     // --- Compound assignment ---
     CompoundAddInt,   // +2 bytes (slot) — slot += TOS (int fast path)
     CompoundSubInt,   // +2 bytes (slot)
+    StringAppendLocal, // +2 bytes (slot) — slot = slot + TOS (string in-place fast path)
 
     // --- Collections ---
     MakeList,         // +2 bytes (element count)
