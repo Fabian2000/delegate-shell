@@ -98,7 +98,7 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
         Ok(new_list(result))
     })?;
 
-    reg.add("range", &[Param::Required(Type::Int), Param::Required(Type::Int), Param::Required(Type::Int)], Type::List, builtin_range)?;
+    reg.add("range", &[Param::Required(Type::Int), Param::Required(Type::Int), Param::Optional(Type::Int)], Type::List, builtin_range)?;
 
     reg.add("slice", &[Param::Required(Type::List), Param::Required(Type::Int), Param::Required(Type::Int)], Type::List, |args| {
         let Value::List(l) = &args[0] else { unreachable!() };
@@ -169,10 +169,14 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
 fn builtin_range(args: &[Value]) -> Result<Value, String> {
     let Value::Int(start) = &args[0] else { unreachable!() };
     let Value::Int(end) = &args[1] else { unreachable!() };
-    let Value::Int(step) = &args[2] else { unreachable!() };
+    let step = if args.len() > 2 {
+        let Value::Int(s) = &args[2] else { unreachable!() };
+        *s
+    } else {
+        1
+    };
     let start = *start;
     let end = *end;
-    let step = *step;
     if step == 0 {
         return Err("range() step cannot be 0".to_string());
     }

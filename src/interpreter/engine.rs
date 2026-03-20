@@ -17,6 +17,10 @@ pub struct Interpreter {
     send_value: Option<Value>,
     /// Optional cancel flag — checked periodically during execution
     pub cancel_flag: Option<&'static std::sync::atomic::AtomicBool>,
+    /// Execution mode (TreeWalk, Vm, Jit)
+    execution_mode: crate::vm::ExecutionMode,
+    /// Whether any code has been executed (locks execution mode)
+    has_executed: bool,
 }
 
 /// Return control flow signal
@@ -35,7 +39,22 @@ impl Interpreter {
             registry: crate::builtins::registry::build_default_registry()?,
             send_value: None,
             cancel_flag: None,
+            execution_mode: crate::vm::ExecutionMode::Auto,
+            has_executed: false,
         })
+    }
+
+    /// Set the execution mode. Must be called before any code is executed.
+    pub fn set_execution_mode(&mut self, mode: crate::vm::ExecutionMode) -> Result<(), String> {
+        if self.has_executed {
+            return Err("Cannot change execution mode after code has been executed".to_string());
+        }
+        self.execution_mode = mode;
+        Ok(())
+    }
+
+    pub(crate) fn is_jit_mode(&self) -> bool {
+        self.execution_mode == crate::vm::ExecutionMode::Jit
     }
 
     /// Register a custom builtin function. Returns `Err` if the name is already taken.
@@ -78,12 +97,64 @@ impl Interpreter {
     ///
     /// Returns an error if any statement fails to execute.
     pub fn run(&mut self, stmts: &[Stmt]) -> Result<(), String> {
-        for stmt in stmts {
-            if let FlowSignal::Return(_) = self.exec_stmt(stmt)? {
-                break;
+        self.has_executed = true;
+
+        // Auto mode: compile first, analyze, then decide
+        let mode = if self.execution_mode == crate::vm::ExecutionMode::Auto {
+            let chunks = crate::vm::compiler::Compiler::compile(stmts)?;
+            let chosen = crate::vm::auto_mode::choose_mode(&chunks);
+            // If Auto chose TreeWalk, fall through to tree-walker
+            // Otherwise run via VM/JIT with the already-compiled chunks
+            if chosen == crate::vm::ExecutionMode::TreeWalk {
+                crate::vm::ExecutionMode::TreeWalk
+            } else {
+                self.pre_register_functions(stmts);
+                let mut vm = crate::vm::machine::VM::new();
+                if chosen == crate::vm::ExecutionMode::Jit {
+                    self.execution_mode = crate::vm::ExecutionMode::Jit;
+                }
+                return vm.execute(chunks, self);
+            }
+        } else {
+            self.execution_mode
+        };
+
+        match mode {
+            crate::vm::ExecutionMode::TreeWalk | crate::vm::ExecutionMode::Auto => {
+                for stmt in stmts {
+                    if let FlowSignal::Return(_) = self.exec_stmt(stmt)? {
+                        break;
+                    }
+                }
+                Ok(())
+            }
+            crate::vm::ExecutionMode::Vm | crate::vm::ExecutionMode::Jit => {
+                self.pre_register_functions(stmts);
+                let chunks = crate::vm::compiler::Compiler::compile(stmts)?;
+                let mut vm = crate::vm::machine::VM::new();
+                vm.execute(chunks, self)
             }
         }
-        Ok(())
+    }
+
+    /// Pre-register function definitions in the tree-walker env
+    /// so builtins (map, filter, etc.) can find and call them.
+    fn pre_register_functions(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            if let StmtKind::FnDef { name, params, optional_params, return_type_ann, body } = &stmt.kind {
+                self.env.define_fn(crate::interpreter::env::UserFn {
+                    name: name.clone(),
+                    params: params.clone(),
+                    optional_params: optional_params.clone(),
+                    declared_return_type: return_type_ann.clone(),
+                    has_dyn_return: body_has_dyn_return(body),
+                    inferred_types: std::collections::HashMap::new(),
+                    body_inferred_params: std::collections::HashSet::new(),
+                    body: body.clone(),
+                    return_type: None,
+                });
+            }
+        }
     }
 
     fn exec_stmt(&mut self, stmt: &Stmt) -> Result<FlowSignal, String> {

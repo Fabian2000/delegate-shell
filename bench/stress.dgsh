@@ -1,0 +1,306 @@
+# =============================================================================
+# STRESS TEST: Comprehensive language benchmark
+# Tests: recursion, iteration, objects, lists, strings, sorting, math,
+#        nested loops, function calls, field access, index access,
+#        error handling, match, enum, lambdas, compound ops
+# =============================================================================
+
+# --- 1. Recursive tree builder ---
+build_tree(depth, id)
+    if depth == 0
+        return {value = id, left = 0, right = 0, leaf = true}
+    return {value = id, left = build_tree!(depth - 1, id * 2), right = build_tree!(depth - 1, id * 2 + 1), leaf = false}
+
+tree_sum(node)
+    if node.leaf
+        return node.value
+    return node.value + tree_sum!(node.left) + tree_sum!(node.right)
+
+tree_depth(node)
+    if node.leaf
+        return 1
+    ld = tree_depth!(node.left)
+    rd = tree_depth!(node.right)
+    if ld > rd
+        return ld + 1
+    return rd + 1
+
+tree = build_tree!(4, 1)
+println("tree sum = {tree_sum!(tree)}")
+println("tree depth = {tree_depth!(tree)}")
+
+# --- 2. Matrix operations ---
+mat_create(rows, cols, fill)
+    m = []
+    r = 0
+    while r < rows
+        row = []
+        c = 0
+        while c < cols
+            push(row, fill + r * cols + c)
+            c++
+        push(m, row)
+        r++
+    return m
+
+mat_multiply(a, b, n)
+    result = []
+    i = 0
+    while i < n
+        row = []
+        j = 0
+        while j < n
+            total = 0
+            k = 0
+            while k < n
+                total = total + a[i][k] * b[k][j]
+                k++
+            push(row, total)
+            j++
+        push(result, row)
+        i++
+    return result
+
+m1 = mat_create!(4, 4, 1)
+m2 = mat_create!(4, 4, 2)
+# Multiply 50 times
+iter = 0
+while iter < 50
+    result = mat_multiply!(m1, m2, 4)
+    iter++
+println("matrix[0][0] = {result[0][0]}")
+println("matrix[3][3] = {result[3][3]}")
+
+# --- 3. Quicksort + verification ---
+quicksort(arr, lo, hi)
+    if lo >= hi
+        return arr
+    pivot = arr[hi]
+    i = lo
+    j = lo
+    while j < hi
+        if arr[j] < pivot
+            tmp = arr[i]
+            arr[i] = arr[j]
+            arr[j] = tmp
+            i++
+        j++
+    tmp = arr[i]
+    arr[i] = arr[hi]
+    arr[hi] = tmp
+    quicksort!(arr, lo, i - 1)
+    quicksort!(arr, i + 1, hi)
+    return arr
+
+# Generate 1000 pseudorandom numbers
+data = []
+seed = 98765
+i = 0
+while i < 1000
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    push(data, seed % 10000)
+    i++
+
+sorted = quicksort!(data, 0, 999)
+
+# Verify sorted
+is_sorted = true
+i = 0
+while i < 999
+    if sorted[i] > sorted[i + 1]
+        is_sorted = false
+    i++
+println("sorted: {is_sorted}")
+println("min: {sorted[0]}, max: {sorted[999]}")
+
+# --- 4. Prime sieve with object accumulator ---
+sieve(limit)
+    primes = []
+    flags = []
+    i = 0
+    while i < limit
+        push(flags, true)
+        i++
+
+    i = 2
+    while i * i < limit
+        if flags[i]
+            j = i * i
+            while j < limit
+                flags[j] = false
+                j = j + i
+        i++
+
+    i = 2
+    while i < limit
+        if flags[i]
+            push(primes, i)
+        i++
+    return primes
+
+primes = sieve!(10000)
+println("primes count: {len(primes)}")
+println("largest prime < 10000: {primes[len(primes) - 1]}")
+
+# Sum all primes
+prime_sum = 0
+for p in primes
+    prime_sum = prime_sum + p
+println("prime sum: {prime_sum}")
+
+# --- 5. String operations ---
+words = ["the", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog"]
+sentence = ""
+for w in words
+    if len(sentence) > 0
+        sentence = sentence + " "
+    sentence = sentence + w
+println("sentence: {sentence}")
+println("sentence len: {len(sentence)}")
+
+# Reverse words
+reversed = ""
+i = len(words) - 1
+while i >= 0
+    if len(reversed) > 0
+        reversed = reversed + " "
+    reversed = reversed + words[i]
+    i--
+println("reversed: {reversed}")
+
+# --- 6. Fibonacci variants ---
+fib_iter(n)
+    if n <= 1
+        return n
+    a = 0
+    b = 1
+    i = 2
+    while i <= n
+        tmp = a + b
+        a = b
+        b = tmp
+        i++
+    return b
+
+println("fib_iter(50) = {fib_iter!(50)}")
+
+# --- 7. Collatz conjecture ---
+collatz_len(n)
+    steps = 0
+    while n != 1
+        if n % 2 == 0
+            n = n / 2
+        else
+            n = n * 3 + 1
+        steps++
+    return steps
+
+max_collatz = 0
+max_start = 0
+i = 1
+while i < 10000
+    c = collatz_len!(i)
+    if c > max_collatz
+        max_collatz = c
+        max_start = i
+    i++
+println("longest collatz < 10000: start={max_start} steps={max_collatz}")
+
+# --- 8. Enum + match ---
+enum Status
+    PENDING
+    RUNNING
+    DONE
+    FAILED
+
+status_name(s)
+    match s
+        0
+            return "pending"
+        1
+            return "running"
+        2
+            return "done"
+        3
+            return "failed"
+        default
+            return "unknown"
+
+println("status 2 = {status_name!(Status.DONE)}")
+
+# --- 9. Lambda + higher-order ---
+apply_twice(f, x)
+    first = f(x)
+    return f(first)
+
+triple(x)
+    return x * 3
+
+println("triple twice 2 = {apply_twice!(@triple!, 2)}")
+
+# --- 10. Nested data processing ---
+students = []
+push(students, {name = "Alice", grades = [90, 85, 92, 88]})
+push(students, {name = "Bob", grades = [78, 82, 75, 80]})
+push(students, {name = "Charlie", grades = [95, 98, 92, 97]})
+push(students, {name = "Diana", grades = [88, 91, 85, 90]})
+
+for s in students
+    total = 0
+    for g in s.grades
+        total = total + g
+    avg = total / len(s.grades)
+    println("{s.name}: avg = {avg}")
+
+# --- 11. Error handling ---
+safe_div(a, b)
+    if b == 0
+        throw "division by zero"
+    return a / b
+
+result? = safe_div!(10, 0)
+if result?
+    println("unexpected")
+else
+    println("caught division by zero")
+
+result2? = safe_div!(10, 2)
+if result2?
+    println("10 / 2 = {result2}")
+
+# --- 12. Nested loop computation ---
+total = 0
+i = 0
+while i < 200
+    j = 0
+    while j < 200
+        if (i + j) % 3 == 0
+            total = total + i * j
+        j++
+    i++
+println("nested computation = {total}")
+
+# --- 13. Object mutation chain ---
+counter = {value = 0, increments = 0}
+i = 0
+while i < 10000
+    counter.value = counter.value + 1
+    counter.increments = counter.increments + 1
+    i++
+println("counter = {counter.value}, increments = {counter.increments}")
+
+# --- 14. List comprehension simulation ---
+squares = []
+i = 0
+while i < 100
+    push(squares, i * i)
+    i++
+
+even_squares = []
+for sq in squares
+    if sq % 2 == 0
+        push(even_squares, sq)
+println("even squares count = {len(even_squares)}")
+println("last even square = {even_squares[len(even_squares) - 1]}")
+
+println("=== STRESS TEST COMPLETE ===")

@@ -13,6 +13,11 @@ path = "src/lib.rs"
 
 [dependencies]
 chrono = "0.4.44"
+cranelift-codegen = "0.116"
+cranelift-frontend = "0.116"
+cranelift-jit = "0.116"
+cranelift-module = "0.116"
+cranelift-native = "0.116"
 hostname = "0.4.2"
 indexmap = "2.13.0"
 regex = "1.12.3"

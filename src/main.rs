@@ -10,7 +10,11 @@ static CANCELLED: AtomicBool = AtomicBool::new(false);
 fn main() {
     ctrlc_handler();
 
-    let args: Vec<String> = env::args().collect();
+    let raw_args: Vec<String> = env::args().collect();
+    // Separate flags from positional args
+    let args: Vec<String> = std::iter::once(raw_args[0].clone())
+        .chain(raw_args.iter().skip(1).filter(|a| !a.starts_with("--")).cloned())
+        .collect();
 
     if args.len() < 2 {
         run_repl();
@@ -42,6 +46,14 @@ fn main() {
         eprintln!("Failed to initialize: {e}");
         std::process::exit(1);
     });
+    // Execution mode override (default: Auto)
+    if raw_args.iter().any(|a| a == "--vm") {
+        let _ = engine.set_execution_mode(delegate_shell::ExecutionMode::Vm);
+    } else if raw_args.iter().any(|a| a == "--jit") {
+        let _ = engine.set_execution_mode(delegate_shell::ExecutionMode::Jit);
+    } else if raw_args.iter().any(|a| a == "--tw") {
+        let _ = engine.set_execution_mode(delegate_shell::ExecutionMode::TreeWalk);
+    }
     engine.cancel_flag = Some(&CANCELLED);
     if let Err(e) = engine.run_source(&source) {
         eprintln!("Runtime error: {e}");
