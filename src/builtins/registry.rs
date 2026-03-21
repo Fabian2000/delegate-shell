@@ -99,10 +99,15 @@ pub struct BuiltinRegistry {
 }
 
 impl BuiltinRegistry {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             defs: HashMap::new(),
         }
+    }
+
+    /// Create an empty registry with no builtins registered.
+    pub fn empty() -> Self {
+        Self::new()
     }
 
     /// Register a builtin function. Returns `Err` if the name is already taken.

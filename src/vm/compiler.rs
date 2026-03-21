@@ -23,7 +23,7 @@ struct Local {
 }
 
 struct LoopCtx {
-    start: usize,
+    _start: usize,
     break_jumps: Vec<usize>,
     continue_jumps: Vec<usize>,
 }
@@ -247,6 +247,27 @@ impl Compiler {
                 self.compile_binary_op(left, *op, right, line)?;
             }
             ExprKind::UnaryOp { op, expr: inner } => {
+                // Constant folding for unary ops on literals
+                match (op, &inner.kind) {
+                    (UnaryOp::Neg, ExprKind::Int(n)) => {
+                        self.chunk.emit_i64(Op::LoadInt, n.wrapping_neg(), line);
+                        return Ok(());
+                    }
+                    (UnaryOp::Neg, ExprKind::Float(n)) => {
+                        self.chunk.emit_f64(Op::LoadFloat, -n, line);
+                        return Ok(());
+                    }
+                    (UnaryOp::Not, ExprKind::Bool(b)) => {
+                        self.chunk.emit(if *b { Op::LoadFalse } else { Op::LoadTrue }, line);
+                        return Ok(());
+                    }
+                    (UnaryOp::BitNot, ExprKind::Int(n)) => {
+                        self.chunk.emit_i64(Op::LoadInt, !n, line);
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+                // Fall through: compile normally
                 self.compile_expr(inner)?;
                 match op {
                     UnaryOp::Neg => {
@@ -409,6 +430,114 @@ impl Compiler {
                 return Ok(());
             }
             _ => {}
+        }
+
+        // =============================================================
+        // Constant folding: compute literal op literal at compile time
+        // =============================================================
+
+        // Int op Int
+        if let (ExprKind::Int(a), ExprKind::Int(b)) = (&left.kind, &right.kind) {
+            match op {
+                BinOp::Add => { self.chunk.emit_i64(Op::LoadInt, a.wrapping_add(*b), line); return Ok(()); }
+                BinOp::Sub => { self.chunk.emit_i64(Op::LoadInt, a.wrapping_sub(*b), line); return Ok(()); }
+                BinOp::Mul => { self.chunk.emit_i64(Op::LoadInt, a.wrapping_mul(*b), line); return Ok(()); }
+                BinOp::Div => {
+                    if *b != 0 { self.chunk.emit_i64(Op::LoadInt, a.wrapping_div(*b), line); return Ok(()); }
+                    // fall through for div-by-zero — let runtime handle it
+                }
+                BinOp::Mod => {
+                    if *b != 0 { self.chunk.emit_i64(Op::LoadInt, a.wrapping_rem(*b), line); return Ok(()); }
+                }
+                BinOp::Pow => {
+                    if *b >= 0 && *b <= 63 {
+                        self.chunk.emit_i64(Op::LoadInt, a.wrapping_pow(*b as u32), line);
+                        return Ok(());
+                    }
+                }
+                BinOp::Eq    => { self.chunk.emit(if a == b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                BinOp::NotEq => { self.chunk.emit(if a != b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                BinOp::Lt    => { self.chunk.emit(if a <  b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                BinOp::Gt    => { self.chunk.emit(if a >  b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                BinOp::LtEq  => { self.chunk.emit(if a <= b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                BinOp::GtEq  => { self.chunk.emit(if a >= b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                BinOp::BitAnd => { self.chunk.emit_i64(Op::LoadInt, a & b, line); return Ok(()); }
+                BinOp::BitOr  => { self.chunk.emit_i64(Op::LoadInt, a | b, line); return Ok(()); }
+                BinOp::BitXor => { self.chunk.emit_i64(Op::LoadInt, a ^ b, line); return Ok(()); }
+                BinOp::Shl => { self.chunk.emit_i64(Op::LoadInt, a.wrapping_shl(*b as u32), line); return Ok(()); }
+                BinOp::Shr => { self.chunk.emit_i64(Op::LoadInt, a.wrapping_shr(*b as u32), line); return Ok(()); }
+                _ => {}
+            }
+        }
+
+        // Float op Float
+        if let (ExprKind::Float(a), ExprKind::Float(b)) = (&left.kind, &right.kind) {
+            match op {
+                BinOp::Add => { self.chunk.emit_f64(Op::LoadFloat, a + b, line); return Ok(()); }
+                BinOp::Sub => { self.chunk.emit_f64(Op::LoadFloat, a - b, line); return Ok(()); }
+                BinOp::Mul => { self.chunk.emit_f64(Op::LoadFloat, a * b, line); return Ok(()); }
+                BinOp::Div => { self.chunk.emit_f64(Op::LoadFloat, a / b, line); return Ok(()); }
+                BinOp::Mod => { self.chunk.emit_f64(Op::LoadFloat, a % b, line); return Ok(()); }
+                BinOp::Pow => { self.chunk.emit_f64(Op::LoadFloat, a.powf(*b), line); return Ok(()); }
+                BinOp::Eq    => { self.chunk.emit(if a == b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                BinOp::NotEq => { self.chunk.emit(if a != b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                BinOp::Lt    => { self.chunk.emit(if a <  b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                BinOp::Gt    => { self.chunk.emit(if a >  b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                BinOp::LtEq  => { self.chunk.emit(if a <= b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                BinOp::GtEq  => { self.chunk.emit(if a >= b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                _ => {}
+            }
+        }
+
+        // Int op Float / Float op Int (promote to float)
+        if let Some(a) = match &left.kind { ExprKind::Int(n) => Some(*n as f64), ExprKind::Float(n) => Some(*n), _ => None } {
+            if let Some(b) = match &right.kind { ExprKind::Int(n) => Some(*n as f64), ExprKind::Float(n) => Some(*n), _ => None } {
+                // Only fold mixed int/float cases (pure int and pure float already handled above)
+                let is_mixed = matches!((&left.kind, &right.kind), (ExprKind::Int(_), ExprKind::Float(_)) | (ExprKind::Float(_), ExprKind::Int(_)));
+                if is_mixed {
+                    match op {
+                        BinOp::Add => { self.chunk.emit_f64(Op::LoadFloat, a + b, line); return Ok(()); }
+                        BinOp::Sub => { self.chunk.emit_f64(Op::LoadFloat, a - b, line); return Ok(()); }
+                        BinOp::Mul => { self.chunk.emit_f64(Op::LoadFloat, a * b, line); return Ok(()); }
+                        BinOp::Div => { self.chunk.emit_f64(Op::LoadFloat, a / b, line); return Ok(()); }
+                        BinOp::Mod => { self.chunk.emit_f64(Op::LoadFloat, a % b, line); return Ok(()); }
+                        BinOp::Pow => { self.chunk.emit_f64(Op::LoadFloat, a.powf(b), line); return Ok(()); }
+                        BinOp::Eq    => { self.chunk.emit(if a == b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                        BinOp::NotEq => { self.chunk.emit(if a != b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                        BinOp::Lt    => { self.chunk.emit(if a <  b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                        BinOp::Gt    => { self.chunk.emit(if a >  b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                        BinOp::LtEq  => { self.chunk.emit(if a <= b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                        BinOp::GtEq  => { self.chunk.emit(if a >= b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // String + String (concatenation)
+        if op == BinOp::Add {
+            if let (ExprKind::String(left_parts), ExprKind::String(right_parts)) = (&left.kind, &right.kind) {
+                if left_parts.len() == 1 && right_parts.len() == 1 {
+                    if let (StringPart::Literal(a), StringPart::Literal(b)) = (&left_parts[0], &right_parts[0]) {
+                        let mut concat = String::with_capacity(a.len() + b.len());
+                        concat.push_str(a);
+                        concat.push_str(b);
+                        let idx = self.chunk.constants.add(&concat);
+                        self.chunk.emit_u16(Op::LoadConst, idx, line);
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        // Bool && Bool, Bool || Bool (already handled by short-circuit above, but
+        // constant fold for completeness if both are literal bools)
+        if let (ExprKind::Bool(a), ExprKind::Bool(b)) = (&left.kind, &right.kind) {
+            match op {
+                BinOp::Eq    => { self.chunk.emit(if a == b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                BinOp::NotEq => { self.chunk.emit(if a != b { Op::LoadTrue } else { Op::LoadFalse }, line); return Ok(()); }
+                _ => {}
+            }
         }
 
         // Superinstruction: local +/- int_literal
@@ -641,7 +770,7 @@ impl Compiler {
         let loop_start = self.chunk.pos();
         self.chunk.emit(Op::CheckCancel, line);
 
-        self.loop_stack.push(LoopCtx { start: loop_start, break_jumps: Vec::new(), continue_jumps: Vec::new() });
+        self.loop_stack.push(LoopCtx { _start: loop_start, break_jumps: Vec::new(), continue_jumps: Vec::new() });
 
         self.compile_expr(condition)?;
         let exit_jump = self.chunk.emit_jump(Op::JumpIfFalse, line);
@@ -686,7 +815,7 @@ impl Compiler {
         let loop_start = self.chunk.pos();
         self.chunk.emit(Op::CheckCancel, line);
 
-        self.loop_stack.push(LoopCtx { start: loop_start, break_jumps: Vec::new(), continue_jumps: Vec::new() });
+        self.loop_stack.push(LoopCtx { _start: loop_start, break_jumps: Vec::new(), continue_jumps: Vec::new() });
 
         // Condition: idx < len(iter)
         // Emit: GetLocal(idx), GetLocal(iter), LenList, LtInt, JumpIfFalse
@@ -808,7 +937,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn set_variable_error_tolerant(&mut self, name: &str, line: u32) {
+    fn _set_variable_error_tolerant(&mut self, name: &str, line: u32) {
         if let Some(slot) = self.resolve_local(name) {
             self.chunk.emit_u16(Op::SetErrorTolerant, slot, line);
         } else {

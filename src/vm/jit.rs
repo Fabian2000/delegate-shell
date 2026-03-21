@@ -1,4 +1,5 @@
-use cranelift_codegen::ir::{types, AbiParam, Function, InstBuilder, UserFuncName};
+
+use cranelift_codegen::ir::{types, AbiParam, Function, InstBuilder, UserFuncName, StackSlotData, StackSlotKind};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::Context;
@@ -8,10 +9,42 @@ use cranelift_module::{Linkage, Module};
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::cell::Cell;
 use super::bytecode::{Chunk, Op};
 use crate::interpreter::value::{Value, ValueKind as VK, new_list, new_object};
 use crate::interpreter::Interpreter;
 use crate::parser::ast::Resolution;
+
+// Thread-local context for JIT helpers — avoids passing raw pointers through JIT'd code
+thread_local! {
+    static JIT_VM_PTR: Cell<*mut super::machine::VM> = const { Cell::new(std::ptr::null_mut()) };
+    static JIT_INTERP_PTR: Cell<*mut Interpreter> = const { Cell::new(std::ptr::null_mut()) };
+    static JIT_CHUNKS_PTR: Cell<*const Vec<Chunk>> = const { Cell::new(std::ptr::null()) };
+    static JIT_CHUNK_IDX: Cell<usize> = const { Cell::new(0) };
+}
+
+pub fn set_jit_context(vm: *mut super::machine::VM, interp: *mut Interpreter, chunks: *const Vec<Chunk>, chunk_idx: usize) {
+    JIT_VM_PTR.with(|c| c.set(vm));
+    JIT_INTERP_PTR.with(|c| c.set(interp));
+    JIT_CHUNKS_PTR.with(|c| c.set(chunks));
+    JIT_CHUNK_IDX.with(|c| c.set(chunk_idx));
+}
+
+fn get_jit_vm() -> *mut super::machine::VM {
+    JIT_VM_PTR.with(|c| c.get())
+}
+
+fn get_jit_interp() -> *mut Interpreter {
+    JIT_INTERP_PTR.with(|c| c.get())
+}
+
+fn get_jit_chunks() -> *const Vec<Chunk> {
+    JIT_CHUNKS_PTR.with(|c| c.get())
+}
+
+fn get_jit_chunk_idx() -> usize {
+    JIT_CHUNK_IDX.with(|c| c.get())
+}
 
 // ---------------------------------------------------------------------------
 // extern "C" helpers — called from JIT'd code
@@ -88,7 +121,7 @@ unsafe extern "C" fn jit_binary_op(left: u64, right: u64, op_code: u64) -> u64 {
 
 /// Unary negate
 unsafe extern "C" fn jit_negate(val: u64) -> u64 {
-    unsafe {
+    {
         let v = Value::from_raw(val);
         let result = if let Some(n) = v.as_int() {
             Value::int(-n)
@@ -106,7 +139,7 @@ unsafe extern "C" fn jit_negate(val: u64) -> u64 {
 
 /// Unary bitwise not
 unsafe extern "C" fn jit_bitnot(val: u64) -> u64 {
-    unsafe {
+    {
         let v = Value::from_raw(val);
         let result = if let Some(n) = v.as_int() {
             Value::int(!n)
@@ -122,7 +155,7 @@ unsafe extern "C" fn jit_bitnot(val: u64) -> u64 {
 
 /// Logical not
 unsafe extern "C" fn jit_not(val: u64) -> u64 {
-    unsafe {
+    {
         let v = Value::from_raw(val);
         let result = Value::bool(!v.is_truthy());
         std::mem::forget(v);
@@ -134,7 +167,7 @@ unsafe extern "C" fn jit_not(val: u64) -> u64 {
 
 /// Pow
 unsafe extern "C" fn jit_pow(base: u64, exp: u64) -> u64 {
-    unsafe {
+    {
         let b = Value::from_raw(base);
         let e = Value::from_raw(exp);
         let result = generic_pow(b, e).unwrap_or_else(|_| Value::void());
@@ -146,7 +179,7 @@ unsafe extern "C" fn jit_pow(base: u64, exp: u64) -> u64 {
 
 /// Truthy check — returns 0 or 1 as raw i64
 unsafe extern "C" fn jit_is_truthy(val: u64) -> u64 {
-    unsafe {
+    {
         let v = Value::from_raw(val);
         let result = if v.is_truthy() { 1u64 } else { 0u64 };
         std::mem::forget(v);
@@ -156,7 +189,7 @@ unsafe extern "C" fn jit_is_truthy(val: u64) -> u64 {
 
 /// Clone a NaN-boxed value (increment refcount if needed)
 unsafe extern "C" fn jit_clone_value(val: u64) -> u64 {
-    unsafe {
+    {
         let v = Value::from_raw(val);
         let cloned = v.clone();
         std::mem::forget(v);
@@ -168,63 +201,18 @@ unsafe extern "C" fn jit_clone_value(val: u64) -> u64 {
 
 /// Drop a NaN-boxed value (decrement refcount if needed)
 unsafe extern "C" fn jit_drop_value(val: u64) {
-    unsafe {
+    {
         let _ = Value::from_raw(val);
         // Value::drop runs here
     }
 }
 
-/// Load a const string from a chunk's constant pool
-unsafe extern "C" fn jit_load_const(chunks_ptr: *const Vec<Chunk>, chunk_idx: u64, const_idx: u64) -> u64 {
-    unsafe {
-        let chunks = &*chunks_ptr;
-        let s = chunks[chunk_idx as usize].constants.get(const_idx as u16).clone();
-        let result = Value::string(Rc::from(s.as_ref()));
-        let raw = result.raw();
-        std::mem::forget(result);
-        raw
-    }
-}
-
-/// Load a float (f64 bits stored in bytecode)
-unsafe extern "C" fn jit_load_float(bits: u64) -> u64 {
-    unsafe {
-        let f = f64::from_bits(bits);
-        let result = Value::float(f);
-        let raw = result.raw();
-        std::mem::forget(result);
-        raw
-    }
-}
 
 /// Load true
-unsafe extern "C" fn jit_load_true() -> u64 {
-    let result = Value::bool(true);
-    let raw = result.raw();
-    std::mem::forget(result);
-    raw
-}
-
-/// Load false
-unsafe extern "C" fn jit_load_false() -> u64 {
-    let result = Value::bool(false);
-    let raw = result.raw();
-    std::mem::forget(result);
-    raw
-}
-
-/// Load void
-unsafe extern "C" fn jit_load_void() -> u64 {
-    let result = Value::void();
-    let raw = result.raw();
-    std::mem::forget(result);
-    raw
-}
-
 /// Get global variable
-unsafe extern "C" fn jit_get_global(vm_ptr: *mut super::machine::VM, idx: u64) -> u64 {
+unsafe extern "C" fn jit_get_global(idx: u64) -> u64 {
     unsafe {
-        let vm = &mut *vm_ptr;
+        let vm = &mut *get_jit_vm();
         let val = vm.get_global(idx as usize);
         let raw = val.raw();
         std::mem::forget(val);
@@ -233,9 +221,9 @@ unsafe extern "C" fn jit_get_global(vm_ptr: *mut super::machine::VM, idx: u64) -
 }
 
 /// Set global variable
-unsafe extern "C" fn jit_set_global(vm_ptr: *mut super::machine::VM, idx: u64, val: u64) {
+unsafe extern "C" fn jit_set_global(idx: u64, val: u64) {
     unsafe {
-        let vm = &mut *vm_ptr;
+        let vm = &mut *get_jit_vm();
         let v = Value::from_raw(val);
         let cloned = v.clone();
         std::mem::forget(v);
@@ -244,11 +232,12 @@ unsafe extern "C" fn jit_set_global(vm_ptr: *mut super::machine::VM, idx: u64, v
 }
 
 /// Field get: obj.field
-unsafe extern "C" fn jit_field_get(obj: u64, chunks_ptr: *const Vec<Chunk>, chunk_idx: u64, field_idx: u64) -> u64 {
+unsafe extern "C" fn jit_field_get(obj: u64, field_idx: u64) -> u64 {
     unsafe {
         let o = Value::from_raw(obj);
-        let chunks = &*chunks_ptr;
-        let field: &str = chunks[chunk_idx as usize].constants.get(field_idx as u16);
+        let chunks = &*get_jit_chunks();
+        let chunk_idx = get_jit_chunk_idx();
+        let field: &str = chunks[chunk_idx].constants.get(field_idx as u16);
 
         let result = if let Some(rc) = o.as_object_ref() {
             rc.borrow().fields.get(field).cloned().unwrap_or_else(Value::void)
@@ -271,12 +260,13 @@ unsafe extern "C" fn jit_field_get(obj: u64, chunks_ptr: *const Vec<Chunk>, chun
 }
 
 /// Field set: obj.field = val
-unsafe extern "C" fn jit_field_set(obj: u64, chunks_ptr: *const Vec<Chunk>, chunk_idx: u64, field_idx: u64, val: u64) {
+unsafe extern "C" fn jit_field_set(obj: u64, field_idx: u64, val: u64) {
     unsafe {
         let o = Value::from_raw(obj);
         let v = Value::from_raw(val);
-        let chunks = &*chunks_ptr;
-        let field: &str = chunks[chunk_idx as usize].constants.get(field_idx as u16);
+        let chunks = &*get_jit_chunks();
+        let chunk_idx = get_jit_chunk_idx();
+        let field: &str = chunks[chunk_idx].constants.get(field_idx as u16);
         let v_cloned = v.clone();
 
         if let Some(rc) = o.as_object_ref() {
@@ -290,7 +280,7 @@ unsafe extern "C" fn jit_field_set(obj: u64, chunks_ptr: *const Vec<Chunk>, chun
 
 /// Index get: target[index]
 unsafe extern "C" fn jit_index_get(target: u64, index: u64) -> u64 {
-    unsafe {
+    {
         let t = Value::from_raw(target);
         let i = Value::from_raw(index);
         let result = vm_index(&t, &i).unwrap_or_else(|_| Value::void());
@@ -304,7 +294,7 @@ unsafe extern "C" fn jit_index_get(target: u64, index: u64) -> u64 {
 
 /// Index set: target[index] = val
 unsafe extern "C" fn jit_index_set(target: u64, index: u64, val: u64) {
-    unsafe {
+    {
         let t = Value::from_raw(target);
         let idx = Value::from_raw(index);
         let v = Value::from_raw(val);
@@ -384,7 +374,7 @@ unsafe extern "C" fn jit_make_string(parts_ptr: *const u64, count: u64) -> u64 {
 
 /// Make range (start..=end as list)
 unsafe extern "C" fn jit_make_range(start: u64, end: u64) -> u64 {
-    unsafe {
+    {
         let s = Value::from_raw(start);
         let e = Value::from_raw(end);
         let result = match (s.as_int(), e.as_int()) {
@@ -404,20 +394,17 @@ unsafe extern "C" fn jit_make_range(start: u64, end: u64) -> u64 {
 
 /// Generic call (user fn or builtin with full resolution)
 unsafe extern "C" fn jit_generic_call(
-    interp_ptr: *mut Interpreter,
-    vm_ptr: *mut super::machine::VM,
-    chunks_ptr: *const Vec<Chunk>,
-    chunk_idx: u64,
     name_idx: u64,
     res: u64,
     args_ptr: *const u64,
     argc: u64,
 ) -> u64 {
     unsafe {
-        let interp = &mut *interp_ptr;
-        let vm = &mut *vm_ptr;
-        let chunks = &*chunks_ptr;
-        let name = chunks[chunk_idx as usize].constants.get(name_idx as u16).clone();
+        let interp = &mut *get_jit_interp();
+        let vm = &mut *get_jit_vm();
+        let chunks = &*get_jit_chunks();
+        let chunk_idx = get_jit_chunk_idx();
+        let name = chunks[chunk_idx].constants.get(name_idx as u16).clone();
 
         let args: Vec<Value> = std::slice::from_raw_parts(args_ptr, argc as usize)
             .iter()
@@ -480,17 +467,15 @@ unsafe extern "C" fn jit_generic_call(
 
 /// Call builtin by name
 unsafe extern "C" fn jit_call_builtin_v2(
-    interp_ptr: *mut Interpreter,
-    chunks_ptr: *const Vec<Chunk>,
-    chunk_idx: u64,
     name_idx: u64,
     args_ptr: *const u64,
     argc: u64,
 ) -> u64 {
     unsafe {
-        let interp = &mut *interp_ptr;
-        let chunks = &*chunks_ptr;
-        let name = chunks[chunk_idx as usize].constants.get(name_idx as u16).clone();
+        let interp = &mut *get_jit_interp();
+        let chunks = &*get_jit_chunks();
+        let chunk_idx = get_jit_chunk_idx();
+        let name = chunks[chunk_idx].constants.get(name_idx as u16).clone();
 
         let args: Vec<Value> = std::slice::from_raw_parts(args_ptr, argc as usize)
             .iter()
@@ -528,16 +513,15 @@ unsafe extern "C" fn jit_call_builtin_v2(
 
 /// Make lambda
 unsafe extern "C" fn jit_make_lambda(
-    chunks_ptr: *const Vec<Chunk>,
-    chunk_idx: u64,
     name_idx: u64,
     res: u64,
     args_ptr: *const u64,
     bound_count: u64,
 ) -> u64 {
     unsafe {
-        let chunks = &*chunks_ptr;
-        let name = chunks[chunk_idx as usize].constants.get(name_idx as u16).clone();
+        let chunks = &*get_jit_chunks();
+        let chunk_idx = get_jit_chunk_idx();
+        let name = chunks[chunk_idx].constants.get(name_idx as u16).clone();
 
         let bound_args: Vec<Value> = std::slice::from_raw_parts(args_ptr, bound_count as usize)
             .iter()
@@ -565,7 +549,7 @@ unsafe extern "C" fn jit_make_lambda(
 /// mode: 0=inc(no push), 1=dec(no push), 2=post_inc, 3=post_dec, 4=pre_inc, 5=pre_dec
 /// Returns: the value to push on stack (or 0 if nothing to push)
 unsafe extern "C" fn jit_inc_dec(val: u64, op: u64) -> u64 {
-    unsafe {
+    {
         let v = Value::from_raw(val);
         let result = match op {
             0 => { // inc (no push)
@@ -593,7 +577,7 @@ unsafe extern "C" fn jit_inc_dec(val: u64, op: u64) -> u64 {
 /// Takes ownership of local_val (caller must not forget it); forgets rhs.
 /// If both are strings and local_val has refcount 1, appends in-place.
 unsafe extern "C" fn jit_string_append_local(local_val: u64, rhs: u64) -> u64 {
-    unsafe {
+    {
         let mut lv = Value::from_raw(local_val);
         let rv = Value::from_raw(rhs);
         let result = if lv.is_string() && rv.is_string() {
@@ -619,7 +603,7 @@ unsafe extern "C" fn jit_string_append_local(local_val: u64, rhs: u64) -> u64 {
             Value::int(a + b)
         } else {
             // Generic add
-            match generic_add(&lv, &rv) {
+            match generic_add(lv.clone(), rv.clone()) {
                 Ok(v) => {
                     std::mem::forget(lv);
                     std::mem::forget(rv);
@@ -641,7 +625,7 @@ unsafe extern "C" fn jit_string_append_local(local_val: u64, rhs: u64) -> u64 {
 /// Compound add/sub for a local
 /// op: 0=add, 1=sub
 unsafe extern "C" fn jit_compound_op(local_val: u64, rhs: u64, op: u64) -> u64 {
-    unsafe {
+    {
         let lv = Value::from_raw(local_val);
         let rv = Value::from_raw(rhs);
         let result = match op {
@@ -669,57 +653,15 @@ unsafe extern "C" fn jit_compound_op(local_val: u64, rhs: u64, op: u64) -> u64 {
 }
 
 /// SuperInstruction: SubLocalImm / AddLocalImm
-/// op: 0=sub, 1=add
-unsafe extern "C" fn jit_local_imm_op(local_val: u64, imm: u64, op: u64) -> u64 {
-    unsafe {
-        let v = Value::from_raw(local_val);
-        let imm_val = imm as i64;
-        let result = if let Some(n) = v.as_int() {
-            match op {
-                0 => Value::int(n - imm_val),
-                _ => Value::int(n + imm_val),
-            }
-        } else {
-            Value::void()
-        };
-        std::mem::forget(v);
-        let raw = result.raw();
-        std::mem::forget(result);
-        raw
-    }
-}
-
-/// SuperInstruction: BranchIfLocalGtImm / BranchIfLocalLteImm
-/// op: 0 = gt, 1 = lte
-/// returns: 1 if should branch, 0 otherwise
-unsafe extern "C" fn jit_branch_local_imm(local_val: u64, imm: u64, op: u64) -> u64 {
-    unsafe {
-        let v = Value::from_raw(local_val);
-        let imm_val = imm as i64;
-        let result = if let Some(n) = v.as_int() {
-            match op {
-                0 => if n > imm_val { 1u64 } else { 0u64 },
-                _ => if n <= imm_val { 1u64 } else { 0u64 },
-            }
-        } else {
-            0u64
-        };
-        std::mem::forget(v);
-        result
-    }
-}
-
 /// Call a VM function by chunk index (used by CallLocal).
 unsafe extern "C" fn jit_vm_call(
-    vm_ptr: *mut super::machine::VM,
-    interp_ptr: *mut Interpreter,
     chunk_idx: u64,
     args_ptr: *const u64,
     argc: u64,
 ) -> u64 {
     unsafe {
-        let vm = &mut *vm_ptr;
-        let interp = &mut *interp_ptr;
+        let vm = &mut *get_jit_vm();
+        let interp = &mut *get_jit_interp();
         let args = std::slice::from_raw_parts(args_ptr, argc as usize);
         let base = vm.stack.len();
         for &arg_bits in args {
@@ -751,31 +693,29 @@ unsafe extern "C" fn jit_vm_call(
 
 /// Define function in fn_table
 unsafe extern "C" fn jit_define_function(
-    vm_ptr: *mut super::machine::VM,
-    chunks_ptr: *const Vec<Chunk>,
-    chunk_idx: u64,
     name_idx: u64,
     fn_chunk_idx: u64,
 ) {
     unsafe {
-        let vm = &mut *vm_ptr;
-        let chunks = &*chunks_ptr;
-        let name = chunks[chunk_idx as usize].constants.get(name_idx as u16).clone();
+        let vm = &mut *get_jit_vm();
+        let chunks = &*get_jit_chunks();
+        let chunk_idx = get_jit_chunk_idx();
+        let name = chunks[chunk_idx].constants.get(name_idx as u16).clone();
         vm.register_fn(&name, fn_chunk_idx as usize);
     }
 }
 
 /// Free a global
-unsafe extern "C" fn jit_free_global(vm_ptr: *mut super::machine::VM, idx: u64) {
+unsafe extern "C" fn jit_free_global(idx: u64) {
     unsafe {
-        let vm = &mut *vm_ptr;
+        let vm = &mut *get_jit_vm();
         vm.set_global(idx as usize, Value::void());
     }
 }
 
 /// Throw (returns void; actual error handling is TODO)
 unsafe extern "C" fn jit_throw(val: u64) -> u64 {
-    unsafe {
+    {
         let v = Value::from_raw(val);
         // In a full implementation, this would propagate the error.
         // For now, just consume the value.
@@ -789,9 +729,9 @@ unsafe extern "C" fn jit_throw(val: u64) -> u64 {
 }
 
 /// ErrorCheck
-unsafe extern "C" fn jit_error_check(vm_ptr: *mut super::machine::VM, slot: u64) -> u64 {
+unsafe extern "C" fn jit_error_check(slot: u64) -> u64 {
     unsafe {
-        let vm = &*vm_ptr;
+        let vm = &*get_jit_vm();
         let is_ok = vm.error_check(slot as u16);
         let result = Value::bool(is_ok);
         let raw = result.raw();
@@ -801,9 +741,9 @@ unsafe extern "C" fn jit_error_check(vm_ptr: *mut super::machine::VM, slot: u64)
 }
 
 /// ErrorField
-unsafe extern "C" fn jit_error_field(vm_ptr: *mut super::machine::VM, slot: u64) -> u64 {
+unsafe extern "C" fn jit_error_field(slot: u64) -> u64 {
     unsafe {
-        let vm = &*vm_ptr;
+        let vm = &*get_jit_vm();
         let msg = vm.error_field(slot as u16);
         let result = Value::string(Rc::from(msg));
         let raw = result.raw();
@@ -813,25 +753,25 @@ unsafe extern "C" fn jit_error_field(vm_ptr: *mut super::machine::VM, slot: u64)
 }
 
 /// SetErrorTolerant
-unsafe extern "C" fn jit_set_error_tolerant(vm_ptr: *mut super::machine::VM, slot: u64) {
+unsafe extern "C" fn jit_set_error_tolerant(slot: u64) {
     unsafe {
-        let vm = &mut *vm_ptr;
+        let vm = &mut *get_jit_vm();
         vm.set_error_tolerant(slot as u16);
     }
 }
 
 /// RecordError
-unsafe extern "C" fn jit_record_error(vm_ptr: *mut super::machine::VM, slot: u64) {
+unsafe extern "C" fn jit_record_error(slot: u64) {
     unsafe {
-        let vm = &mut *vm_ptr;
+        let vm = &mut *get_jit_vm();
         vm.record_error(slot as u16);
     }
 }
 
 /// OptionalCheck
-unsafe extern "C" fn jit_optional_check(vm_ptr: *mut super::machine::VM, slot: u64) -> u64 {
+unsafe extern "C" fn jit_optional_check(slot: u64) -> u64 {
     unsafe {
-        let vm = &*vm_ptr;
+        let vm = &*get_jit_vm();
         let is_present = vm.optional_check(slot as usize);
         let result = Value::bool(is_present);
         let raw = result.raw();
@@ -841,9 +781,9 @@ unsafe extern "C" fn jit_optional_check(vm_ptr: *mut super::machine::VM, slot: u
 }
 
 /// GetDollarIndex
-unsafe extern "C" fn jit_get_dollar_index(vm_ptr: *mut super::machine::VM, idx: u64) -> u64 {
+unsafe extern "C" fn jit_get_dollar_index(idx: u64) -> u64 {
     unsafe {
-        let vm = &*vm_ptr;
+        let vm = &*get_jit_vm();
         let result = vm.get_dollar_index(idx as usize).unwrap_or_else(|| Value::void());
         let raw = result.raw();
         std::mem::forget(result);
@@ -853,15 +793,13 @@ unsafe extern "C" fn jit_get_dollar_index(vm_ptr: *mut super::machine::VM, idx: 
 
 /// GetDollarField
 unsafe extern "C" fn jit_get_dollar_field(
-    vm_ptr: *mut super::machine::VM,
-    chunks_ptr: *const Vec<Chunk>,
-    chunk_idx: u64,
     field_idx: u64,
 ) -> u64 {
     unsafe {
-        let vm = &*vm_ptr;
-        let chunks = &*chunks_ptr;
-        let field = chunks[chunk_idx as usize].constants.get(field_idx as u16).clone();
+        let vm = &*get_jit_vm();
+        let chunks = &*get_jit_chunks();
+        let chunk_idx = get_jit_chunk_idx();
+        let field = chunks[chunk_idx].constants.get(field_idx as u16).clone();
         let result = vm.get_dollar_field(&field).unwrap_or_else(|| Value::void());
         let raw = result.raw();
         std::mem::forget(result);
@@ -870,9 +808,9 @@ unsafe extern "C" fn jit_get_dollar_field(
 }
 
 /// GetDollar
-unsafe extern "C" fn jit_get_dollar(vm_ptr: *mut super::machine::VM) -> u64 {
+unsafe extern "C" fn jit_get_dollar() -> u64 {
     unsafe {
-        let vm = &*vm_ptr;
+        let vm = &*get_jit_vm();
         let result = vm.get_dollar().unwrap_or_else(|| Value::void());
         let raw = result.raw();
         std::mem::forget(result);
@@ -881,9 +819,9 @@ unsafe extern "C" fn jit_get_dollar(vm_ptr: *mut super::machine::VM) -> u64 {
 }
 
 /// PushSendCtx
-unsafe extern "C" fn jit_push_send_ctx(vm_ptr: *mut super::machine::VM, val: u64) {
+unsafe extern "C" fn jit_push_send_ctx(val: u64) {
     unsafe {
-        let vm = &mut *vm_ptr;
+        let vm = &mut *get_jit_vm();
         let v = Value::from_raw(val);
         let cloned = v.clone();
         std::mem::forget(v);
@@ -892,49 +830,45 @@ unsafe extern "C" fn jit_push_send_ctx(vm_ptr: *mut super::machine::VM, val: u64
 }
 
 /// PopSendCtx
-unsafe extern "C" fn jit_pop_send_ctx(vm_ptr: *mut super::machine::VM) {
+unsafe extern "C" fn jit_pop_send_ctx() {
     unsafe {
-        let vm = &mut *vm_ptr;
+        let vm = &mut *get_jit_vm();
         vm.pop_send_ctx();
     }
 }
 
 /// Alias
 unsafe extern "C" fn jit_alias(
-    interp_ptr: *mut Interpreter,
-    chunks_ptr: *const Vec<Chunk>,
-    chunk_idx: u64,
     name_idx: u64,
     target_idx: u64,
 ) {
     unsafe {
-        let interp = &mut *interp_ptr;
-        let chunks = &*chunks_ptr;
-        let name = chunks[chunk_idx as usize].constants.get(name_idx as u16).clone();
-        let target = chunks[chunk_idx as usize].constants.get(target_idx as u16).clone();
+        let interp = &mut *get_jit_interp();
+        let chunks = &*get_jit_chunks();
+        let chunk_idx = get_jit_chunk_idx();
+        let name = chunks[chunk_idx].constants.get(name_idx as u16).clone();
+        let target = chunks[chunk_idx].constants.get(target_idx as u16).clone();
         interp.env.aliases.insert(name.to_string(), target.to_string());
     }
 }
 
 /// Use
 unsafe extern "C" fn jit_use(
-    interp_ptr: *mut Interpreter,
-    chunks_ptr: *const Vec<Chunk>,
-    chunk_idx: u64,
     path_idx: u64,
     alias_idx: u64,
 ) {
     unsafe {
-        let interp = &mut *interp_ptr;
-        let chunks = &*chunks_ptr;
-        let path = chunks[chunk_idx as usize].constants.get(path_idx as u16).clone();
+        let interp = &mut *get_jit_interp();
+        let chunks = &*get_jit_chunks();
+        let chunk_idx = get_jit_chunk_idx();
+        let path = chunks[chunk_idx].constants.get(path_idx as u16).clone();
         let alias = if alias_idx == 0xFFFF {
             std::path::Path::new(path.as_ref())
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.to_string())
         } else {
-            chunks[chunk_idx as usize].constants.get(alias_idx as u16).to_string()
+            chunks[chunk_idx].constants.get(alias_idx as u16).to_string()
         };
         interp.env.use_paths.insert(alias.to_ascii_lowercase(), path.to_string());
     }
@@ -942,7 +876,7 @@ unsafe extern "C" fn jit_use(
 
 /// Atomic wrap
 unsafe extern "C" fn jit_atomic(val: u64) -> u64 {
-    unsafe {
+    {
         let v = Value::from_raw(val);
         let result = Value::atomic(crate::interpreter::value::AtomicValue::new(&v));
         std::mem::forget(v);
@@ -998,8 +932,6 @@ const H_POW: &str = "jit_pow";
 const H_IS_TRUTHY: &str = "jit_is_truthy";
 const H_CLONE_VALUE: &str = "jit_clone_value";
 const H_DROP_VALUE: &str = "jit_drop_value";
-const H_LOAD_CONST: &str = "jit_load_const";
-const H_LOAD_FLOAT: &str = "jit_load_float";
 const H_GET_GLOBAL: &str = "jit_get_global";
 const H_SET_GLOBAL: &str = "jit_set_global";
 const H_FIELD_GET: &str = "jit_field_get";
@@ -1016,8 +948,6 @@ const H_MAKE_LAMBDA: &str = "jit_make_lambda";
 const H_INC_DEC: &str = "jit_inc_dec";
 const H_COMPOUND_OP: &str = "jit_compound_op";
 const H_STRING_APPEND_LOCAL: &str = "jit_string_append_local";
-const H_LOCAL_IMM_OP: &str = "jit_local_imm_op";
-const H_BRANCH_LOCAL_IMM: &str = "jit_branch_local_imm";
 const H_VM_CALL: &str = "jit_vm_call";
 const H_DEFINE_FUNCTION: &str = "jit_define_function";
 const H_FREE_GLOBAL: &str = "jit_free_global";
@@ -1073,8 +1003,6 @@ impl JitManager {
                 builder.symbol(H_IS_TRUTHY, jit_is_truthy as *const u8);
                 builder.symbol(H_CLONE_VALUE, jit_clone_value as *const u8);
                 builder.symbol(H_DROP_VALUE, jit_drop_value as *const u8);
-                builder.symbol(H_LOAD_CONST, jit_load_const as *const u8);
-                builder.symbol(H_LOAD_FLOAT, jit_load_float as *const u8);
                 builder.symbol(H_GET_GLOBAL, jit_get_global as *const u8);
                 builder.symbol(H_SET_GLOBAL, jit_set_global as *const u8);
                 builder.symbol(H_FIELD_GET, jit_field_get as *const u8);
@@ -1091,8 +1019,6 @@ impl JitManager {
                 builder.symbol(H_INC_DEC, jit_inc_dec as *const u8);
                 builder.symbol(H_COMPOUND_OP, jit_compound_op as *const u8);
                 builder.symbol(H_STRING_APPEND_LOCAL, jit_string_append_local as *const u8);
-                builder.symbol(H_LOCAL_IMM_OP, jit_local_imm_op as *const u8);
-                builder.symbol(H_BRANCH_LOCAL_IMM, jit_branch_local_imm as *const u8);
                 builder.symbol(H_VM_CALL, jit_vm_call as *const u8);
                 builder.symbol(H_DEFINE_FUNCTION, jit_define_function as *const u8);
                 builder.symbol(H_FREE_GLOBAL, jit_free_global as *const u8);
@@ -1153,8 +1079,8 @@ impl JitManager {
             return None;
         }
 
-        // Build signature: all params i64, return i64
-        // Now using NaN-boxed values: params and return are u64 (passed as i64)
+        // Build signature: just actual function params, all i64, return i64.
+        // Context (vm_ptr, interp_ptr, chunks_ptr, chunk_idx) is passed via thread-locals.
         let mut sig = module.make_signature();
         for _ in 0..chunk.param_count {
             sig.params.push(AbiParam::new(types::I64));
@@ -1187,6 +1113,8 @@ impl JitManager {
         Some(module.get_finalized_function(func_id))
     }
 
+    /// Call a JIT'd function. Context is set via thread-locals before calling.
+    /// `args` contains the actual function arguments (1..=8).
     pub unsafe fn call_jit_fn(&self, ptr: *const u8, args: &[u64]) -> u64 {
         unsafe {
             match args.len() {
@@ -1195,32 +1123,32 @@ impl JitManager {
                     func(args[0])
                 }
                 2 => {
-                    let func: unsafe extern "C" fn(u64, u64) -> u64 = std::mem::transmute(ptr);
-                    func(args[0], args[1])
+                    let func: unsafe extern "C" fn(u64,u64) -> u64 = std::mem::transmute(ptr);
+                    func(args[0],args[1])
                 }
                 3 => {
-                    let func: unsafe extern "C" fn(u64, u64, u64) -> u64 = std::mem::transmute(ptr);
-                    func(args[0], args[1], args[2])
+                    let func: unsafe extern "C" fn(u64,u64,u64) -> u64 = std::mem::transmute(ptr);
+                    func(args[0],args[1],args[2])
                 }
                 4 => {
-                    let func: unsafe extern "C" fn(u64, u64, u64, u64) -> u64 = std::mem::transmute(ptr);
-                    func(args[0], args[1], args[2], args[3])
+                    let func: unsafe extern "C" fn(u64,u64,u64,u64) -> u64 = std::mem::transmute(ptr);
+                    func(args[0],args[1],args[2],args[3])
                 }
                 5 => {
-                    let func: unsafe extern "C" fn(u64, u64, u64, u64, u64) -> u64 = std::mem::transmute(ptr);
-                    func(args[0], args[1], args[2], args[3], args[4])
+                    let func: unsafe extern "C" fn(u64,u64,u64,u64,u64) -> u64 = std::mem::transmute(ptr);
+                    func(args[0],args[1],args[2],args[3],args[4])
                 }
                 6 => {
-                    let func: unsafe extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64 = std::mem::transmute(ptr);
-                    func(args[0], args[1], args[2], args[3], args[4], args[5])
+                    let func: unsafe extern "C" fn(u64,u64,u64,u64,u64,u64) -> u64 = std::mem::transmute(ptr);
+                    func(args[0],args[1],args[2],args[3],args[4],args[5])
                 }
                 7 => {
-                    let func: unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64) -> u64 = std::mem::transmute(ptr);
-                    func(args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+                    let func: unsafe extern "C" fn(u64,u64,u64,u64,u64,u64,u64) -> u64 = std::mem::transmute(ptr);
+                    func(args[0],args[1],args[2],args[3],args[4],args[5],args[6])
                 }
                 8 => {
-                    let func: unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64) -> u64 = std::mem::transmute(ptr);
-                    func(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
+                    let func: unsafe extern "C" fn(u64,u64,u64,u64,u64,u64,u64,u64) -> u64 = std::mem::transmute(ptr);
+                    func(args[0],args[1],args[2],args[3],args[4],args[5],args[6],args[7])
                 }
                 _ => Value::void().raw(),
             }
@@ -1255,46 +1183,43 @@ struct HelperRefs {
     pow: cranelift_codegen::ir::FuncRef,           // (i64, i64) -> i64
     is_truthy: cranelift_codegen::ir::FuncRef,     // (i64) -> i64
     clone_value: cranelift_codegen::ir::FuncRef,   // (i64) -> i64
-    load_const: cranelift_codegen::ir::FuncRef,    // (i64, i64, i64) -> i64
-    load_float: cranelift_codegen::ir::FuncRef,    // (i64) -> i64
-    get_global: cranelift_codegen::ir::FuncRef,    // (i64, i64) -> i64
-    set_global: cranelift_codegen::ir::FuncRef,    // (i64, i64, i64) -> void
-    field_get: cranelift_codegen::ir::FuncRef,     // (i64, i64, i64, i64) -> i64
-    field_set: cranelift_codegen::ir::FuncRef,     // (i64, i64, i64, i64, i64) -> void
+    get_global: cranelift_codegen::ir::FuncRef,    // (i64) -> i64
+    set_global: cranelift_codegen::ir::FuncRef,    // (i64, i64) -> void
+    field_get: cranelift_codegen::ir::FuncRef,     // (i64, i64) -> i64
+    field_set: cranelift_codegen::ir::FuncRef,     // (i64, i64, i64) -> void
     index_get: cranelift_codegen::ir::FuncRef,     // (i64, i64) -> i64
     index_set: cranelift_codegen::ir::FuncRef,     // (i64, i64, i64) -> void
     make_list: cranelift_codegen::ir::FuncRef,     // (i64, i64) -> i64
     make_object: cranelift_codegen::ir::FuncRef,   // (i64, i64) -> i64
     make_string: cranelift_codegen::ir::FuncRef,   // (i64, i64) -> i64
     make_range: cranelift_codegen::ir::FuncRef,    // (i64, i64) -> i64
-    generic_call: cranelift_codegen::ir::FuncRef,  // (i64, i64, i64, i64, i64, i64, i64, i64) -> i64
-    call_builtin: cranelift_codegen::ir::FuncRef,  // (i64, i64, i64, i64, i64, i64) -> i64
-    make_lambda: cranelift_codegen::ir::FuncRef,   // (i64, i64, i64, i64, i64, i64) -> i64
+    generic_call: cranelift_codegen::ir::FuncRef,  // (i64, i64, i64, i64) -> i64
+    call_builtin: cranelift_codegen::ir::FuncRef,  // (i64, i64, i64) -> i64
+    make_lambda: cranelift_codegen::ir::FuncRef,   // (i64, i64, i64, i64) -> i64
     inc_dec: cranelift_codegen::ir::FuncRef,       // (i64, i64) -> i64
     compound_op: cranelift_codegen::ir::FuncRef,   // (i64, i64, i64) -> i64
     string_append_local: cranelift_codegen::ir::FuncRef, // (i64, i64) -> i64
-    local_imm_op: cranelift_codegen::ir::FuncRef,  // (i64, i64, i64) -> i64
-    branch_local_imm: cranelift_codegen::ir::FuncRef, // (i64, i64, i64) -> i64
-    vm_call: cranelift_codegen::ir::FuncRef,       // (i64, i64, i64, i64, i64) -> i64
-    define_function: cranelift_codegen::ir::FuncRef, // (i64, i64, i64, i64, i64) -> void
-    free_global: cranelift_codegen::ir::FuncRef,   // (i64, i64) -> void
+    vm_call: cranelift_codegen::ir::FuncRef,       // (i64, i64, i64) -> i64
+    define_function: cranelift_codegen::ir::FuncRef, // (i64, i64) -> void
+    free_global: cranelift_codegen::ir::FuncRef,   // (i64) -> void
     throw: cranelift_codegen::ir::FuncRef,         // (i64) -> i64
-    error_check: cranelift_codegen::ir::FuncRef,   // (i64, i64) -> i64
-    error_field: cranelift_codegen::ir::FuncRef,   // (i64, i64) -> i64
-    set_error_tolerant: cranelift_codegen::ir::FuncRef, // (i64, i64) -> void
-    record_error: cranelift_codegen::ir::FuncRef,  // (i64, i64) -> void
-    optional_check: cranelift_codegen::ir::FuncRef, // (i64, i64) -> i64
-    get_dollar_index: cranelift_codegen::ir::FuncRef, // (i64, i64) -> i64
-    get_dollar_field: cranelift_codegen::ir::FuncRef, // (i64, i64, i64, i64) -> i64
-    get_dollar: cranelift_codegen::ir::FuncRef,    // (i64) -> i64
-    push_send_ctx: cranelift_codegen::ir::FuncRef, // (i64, i64) -> void
-    pop_send_ctx: cranelift_codegen::ir::FuncRef,  // (i64) -> void
-    alias: cranelift_codegen::ir::FuncRef,         // (i64, i64, i64, i64, i64) -> void
-    use_fn: cranelift_codegen::ir::FuncRef,        // (i64, i64, i64, i64, i64) -> void
+    error_check: cranelift_codegen::ir::FuncRef,   // (i64) -> i64
+    error_field: cranelift_codegen::ir::FuncRef,   // (i64) -> i64
+    set_error_tolerant: cranelift_codegen::ir::FuncRef, // (i64) -> void
+    record_error: cranelift_codegen::ir::FuncRef,  // (i64) -> void
+    optional_check: cranelift_codegen::ir::FuncRef, // (i64) -> i64
+    get_dollar_index: cranelift_codegen::ir::FuncRef, // (i64) -> i64
+    get_dollar_field: cranelift_codegen::ir::FuncRef, // (i64) -> i64
+    get_dollar: cranelift_codegen::ir::FuncRef,    // () -> i64
+    push_send_ctx: cranelift_codegen::ir::FuncRef, // (i64) -> void
+    pop_send_ctx: cranelift_codegen::ir::FuncRef,  // () -> void
+    alias: cranelift_codegen::ir::FuncRef,         // (i64, i64) -> void
+    use_fn: cranelift_codegen::ir::FuncRef,        // (i64, i64) -> void
     atomic: cranelift_codegen::ir::FuncRef,        // (i64) -> i64
 }
 
 impl HelperRefs {
+    #[allow(unused_mut, unused_assignments)]
     fn declare(module: &mut JITModule, func: &mut Function) -> Self {
         let i64t = types::I64;
 
@@ -1317,45 +1242,65 @@ impl HelperRefs {
             pow: decl!(H_POW, [i64t, i64t], [i64t]),
             is_truthy: decl!(H_IS_TRUTHY, [i64t], [i64t]),
             clone_value: decl!(H_CLONE_VALUE, [i64t], [i64t]),
-            load_const: decl!(H_LOAD_CONST, [i64t, i64t, i64t], [i64t]),
-            load_float: decl!(H_LOAD_FLOAT, [i64t], [i64t]),
-            get_global: decl!(H_GET_GLOBAL, [i64t, i64t], [i64t]),
-            set_global: decl!(H_SET_GLOBAL, [i64t, i64t, i64t], []),
-            field_get: decl!(H_FIELD_GET, [i64t, i64t, i64t, i64t], [i64t]),
-            field_set: decl!(H_FIELD_SET, [i64t, i64t, i64t, i64t, i64t], []),
+            get_global: decl!(H_GET_GLOBAL, [i64t], [i64t]),
+            set_global: decl!(H_SET_GLOBAL, [i64t, i64t], []),
+            field_get: decl!(H_FIELD_GET, [i64t, i64t], [i64t]),
+            field_set: decl!(H_FIELD_SET, [i64t, i64t, i64t], []),
             index_get: decl!(H_INDEX_GET, [i64t, i64t], [i64t]),
             index_set: decl!(H_INDEX_SET, [i64t, i64t, i64t], []),
             make_list: decl!(H_MAKE_LIST, [i64t, i64t], [i64t]),
             make_object: decl!(H_MAKE_OBJECT, [i64t, i64t], [i64t]),
             make_string: decl!(H_MAKE_STRING, [i64t, i64t], [i64t]),
             make_range: decl!(H_MAKE_RANGE, [i64t, i64t], [i64t]),
-            generic_call: decl!(H_GENERIC_CALL, [i64t, i64t, i64t, i64t, i64t, i64t, i64t, i64t], [i64t]),
-            call_builtin: decl!(H_CALL_BUILTIN, [i64t, i64t, i64t, i64t, i64t, i64t], [i64t]),
-            make_lambda: decl!(H_MAKE_LAMBDA, [i64t, i64t, i64t, i64t, i64t, i64t], [i64t]),
+            generic_call: decl!(H_GENERIC_CALL, [i64t, i64t, i64t, i64t], [i64t]),
+            call_builtin: decl!(H_CALL_BUILTIN, [i64t, i64t, i64t], [i64t]),
+            make_lambda: decl!(H_MAKE_LAMBDA, [i64t, i64t, i64t, i64t], [i64t]),
             inc_dec: decl!(H_INC_DEC, [i64t, i64t], [i64t]),
             compound_op: decl!(H_COMPOUND_OP, [i64t, i64t, i64t], [i64t]),
             string_append_local: decl!(H_STRING_APPEND_LOCAL, [i64t, i64t], [i64t]),
-            local_imm_op: decl!(H_LOCAL_IMM_OP, [i64t, i64t, i64t], [i64t]),
-            branch_local_imm: decl!(H_BRANCH_LOCAL_IMM, [i64t, i64t, i64t], [i64t]),
-            vm_call: decl!(H_VM_CALL, [i64t, i64t, i64t, i64t, i64t], [i64t]),
-            define_function: decl!(H_DEFINE_FUNCTION, [i64t, i64t, i64t, i64t, i64t], []),
-            free_global: decl!(H_FREE_GLOBAL, [i64t, i64t], []),
+            vm_call: decl!(H_VM_CALL, [i64t, i64t, i64t], [i64t]),
+            define_function: decl!(H_DEFINE_FUNCTION, [i64t, i64t], []),
+            free_global: decl!(H_FREE_GLOBAL, [i64t], []),
             throw: decl!(H_THROW, [i64t], [i64t]),
-            error_check: decl!(H_ERROR_CHECK, [i64t, i64t], [i64t]),
-            error_field: decl!(H_ERROR_FIELD, [i64t, i64t], [i64t]),
-            set_error_tolerant: decl!(H_SET_ERROR_TOLERANT, [i64t, i64t], []),
-            record_error: decl!(H_RECORD_ERROR, [i64t, i64t], []),
-            optional_check: decl!(H_OPTIONAL_CHECK, [i64t, i64t], [i64t]),
-            get_dollar_index: decl!(H_GET_DOLLAR_INDEX, [i64t, i64t], [i64t]),
-            get_dollar_field: decl!(H_GET_DOLLAR_FIELD, [i64t, i64t, i64t, i64t], [i64t]),
-            get_dollar: decl!(H_GET_DOLLAR, [i64t], [i64t]),
-            push_send_ctx: decl!(H_PUSH_SEND_CTX, [i64t, i64t], []),
-            pop_send_ctx: decl!(H_POP_SEND_CTX, [i64t], []),
-            alias: decl!(H_ALIAS, [i64t, i64t, i64t, i64t, i64t], []),
-            use_fn: decl!(H_USE, [i64t, i64t, i64t, i64t, i64t], []),
+            error_check: decl!(H_ERROR_CHECK, [i64t], [i64t]),
+            error_field: decl!(H_ERROR_FIELD, [i64t], [i64t]),
+            set_error_tolerant: decl!(H_SET_ERROR_TOLERANT, [i64t], []),
+            record_error: decl!(H_RECORD_ERROR, [i64t], []),
+            optional_check: decl!(H_OPTIONAL_CHECK, [i64t], [i64t]),
+            get_dollar_index: decl!(H_GET_DOLLAR_INDEX, [i64t], [i64t]),
+            get_dollar_field: decl!(H_GET_DOLLAR_FIELD, [i64t], [i64t]),
+            get_dollar: decl!(H_GET_DOLLAR, [], [i64t]),
+            push_send_ctx: decl!(H_PUSH_SEND_CTX, [i64t], []),
+            pop_send_ctx: decl!(H_POP_SEND_CTX, [], []),
+            alias: decl!(H_ALIAS, [i64t, i64t], []),
+            use_fn: decl!(H_USE, [i64t, i64t], []),
             atomic: decl!(H_ATOMIC, [i64t], [i64t]),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// NaN-boxing constants for inline fast paths
+// ---------------------------------------------------------------------------
+const NB_TAG_INT: u64      = 0x7FF8_0000_0000_0000;
+const NB_TAG_BOOL: u64     = 0x7FF9_0000_0000_0000;
+const NB_TAG_MASK: u64     = 0xFFFF_0000_0000_0000;
+const NB_PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+
+/// What the inline int fast-path should compute.
+#[derive(Clone, Copy)]
+enum IntFastOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    Neq,
+    Lt,
+    Gt,
+    Lte,
+    Gte,
 }
 
 // ---------------------------------------------------------------------------
@@ -1365,12 +1310,156 @@ impl HelperRefs {
 struct GenericJitCompiler;
 
 impl GenericJitCompiler {
+    /// Emit an inline int fast-path for a binary operation.
+    ///
+    /// Pattern:
+    ///   if both operands have TAG_INT  ->  native arithmetic, re-tag result
+    ///   else                           ->  call jit_binary_op helper
+    ///
+    /// For division/modulo the fast path also checks for zero divisor and
+    /// falls back to the helper (which returns void).
+    fn emit_int_binop(
+        builder: &mut FunctionBuilder,
+        helpers: &HelperRefs,
+        a: cranelift_codegen::ir::Value,
+        b: cranelift_codegen::ir::Value,
+        fast_op: IntFastOp,
+        bop_code: u64,
+    ) -> cranelift_codegen::ir::Value {
+        let tag_mask = builder.ins().iconst(types::I64, NB_TAG_MASK as i64);
+        let tag_int  = builder.ins().iconst(types::I64, NB_TAG_INT as i64);
+
+        let a_tag    = builder.ins().band(a, tag_mask);
+        let b_tag    = builder.ins().band(b, tag_mask);
+        let a_is_int = builder.ins().icmp(IntCC::Equal, a_tag, tag_int);
+        let b_is_int = builder.ins().icmp(IntCC::Equal, b_tag, tag_int);
+        let both_int = builder.ins().band(a_is_int, b_is_int);
+
+        let fast_block  = builder.create_block();
+        let slow_block  = builder.create_block();
+        let merge_block = builder.create_block();
+        builder.append_block_param(merge_block, types::I64);
+
+        builder.ins().brif(both_int, fast_block, &[], slow_block, &[]);
+
+        // ---- fast path ----
+        builder.switch_to_block(fast_block);
+        builder.seal_block(fast_block);
+
+        let payload_mask_val = builder.ins().iconst(types::I64, NB_PAYLOAD_MASK as i64);
+        let a_payload = builder.ins().band(a, payload_mask_val);
+        let b_payload = builder.ins().band(b, payload_mask_val);
+
+        // Sign-extend payloads from 48 bits to 64 bits for correct signed ops
+        let a_ext = builder.ins().ishl_imm(a_payload, 16);
+        let a_ext = builder.ins().sshr_imm(a_ext, 16);
+        let b_ext = builder.ins().ishl_imm(b_payload, 16);
+        let b_ext = builder.ins().sshr_imm(b_ext, 16);
+
+        let fast_result = match fast_op {
+            IntFastOp::Add => {
+                let sum = builder.ins().iadd(a_ext, b_ext);
+                let masked = builder.ins().band(sum, payload_mask_val);
+                builder.ins().bor(masked, tag_int)
+            }
+            IntFastOp::Sub => {
+                let diff = builder.ins().isub(a_ext, b_ext);
+                let masked = builder.ins().band(diff, payload_mask_val);
+                builder.ins().bor(masked, tag_int)
+            }
+            IntFastOp::Mul => {
+                let prod = builder.ins().imul(a_ext, b_ext);
+                let masked = builder.ins().band(prod, payload_mask_val);
+                builder.ins().bor(masked, tag_int)
+            }
+            IntFastOp::Div => {
+                // Zero check: if b_payload == 0, jump to slow path
+                let zero = builder.ins().iconst(types::I64, 0);
+                let b_is_zero = builder.ins().icmp(IntCC::Equal, b_ext, zero);
+                let div_ok_block = builder.create_block();
+                builder.ins().brif(b_is_zero, slow_block, &[], div_ok_block, &[]);
+
+                builder.switch_to_block(div_ok_block);
+                builder.seal_block(div_ok_block);
+
+                let quot = builder.ins().sdiv(a_ext, b_ext);
+                let masked = builder.ins().band(quot, payload_mask_val);
+                builder.ins().bor(masked, tag_int)
+            }
+            IntFastOp::Mod => {
+                // Zero check
+                let zero = builder.ins().iconst(types::I64, 0);
+                let b_is_zero = builder.ins().icmp(IntCC::Equal, b_ext, zero);
+                let mod_ok_block = builder.create_block();
+                builder.ins().brif(b_is_zero, slow_block, &[], mod_ok_block, &[]);
+
+                builder.switch_to_block(mod_ok_block);
+                builder.seal_block(mod_ok_block);
+
+                let rem = builder.ins().srem(a_ext, b_ext);
+                let masked = builder.ins().band(rem, payload_mask_val);
+                builder.ins().bor(masked, tag_int)
+            }
+            IntFastOp::Eq => {
+                // For int eq, just compare the raw NaN-boxed values directly
+                let eq = builder.ins().icmp(IntCC::Equal, a, b);
+                let true_raw  = builder.ins().iconst(types::I64, (NB_TAG_BOOL | 1) as i64);
+                let false_raw = builder.ins().iconst(types::I64, NB_TAG_BOOL as i64);
+                builder.ins().select(eq, true_raw, false_raw)
+            }
+            IntFastOp::Neq => {
+                let ne = builder.ins().icmp(IntCC::NotEqual, a, b);
+                let true_raw  = builder.ins().iconst(types::I64, (NB_TAG_BOOL | 1) as i64);
+                let false_raw = builder.ins().iconst(types::I64, NB_TAG_BOOL as i64);
+                builder.ins().select(ne, true_raw, false_raw)
+            }
+            IntFastOp::Lt => {
+                let lt = builder.ins().icmp(IntCC::SignedLessThan, a_ext, b_ext);
+                let true_raw  = builder.ins().iconst(types::I64, (NB_TAG_BOOL | 1) as i64);
+                let false_raw = builder.ins().iconst(types::I64, NB_TAG_BOOL as i64);
+                builder.ins().select(lt, true_raw, false_raw)
+            }
+            IntFastOp::Gt => {
+                let gt = builder.ins().icmp(IntCC::SignedGreaterThan, a_ext, b_ext);
+                let true_raw  = builder.ins().iconst(types::I64, (NB_TAG_BOOL | 1) as i64);
+                let false_raw = builder.ins().iconst(types::I64, NB_TAG_BOOL as i64);
+                builder.ins().select(gt, true_raw, false_raw)
+            }
+            IntFastOp::Lte => {
+                let le = builder.ins().icmp(IntCC::SignedLessThanOrEqual, a_ext, b_ext);
+                let true_raw  = builder.ins().iconst(types::I64, (NB_TAG_BOOL | 1) as i64);
+                let false_raw = builder.ins().iconst(types::I64, NB_TAG_BOOL as i64);
+                builder.ins().select(le, true_raw, false_raw)
+            }
+            IntFastOp::Gte => {
+                let ge = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, a_ext, b_ext);
+                let true_raw  = builder.ins().iconst(types::I64, (NB_TAG_BOOL | 1) as i64);
+                let false_raw = builder.ins().iconst(types::I64, NB_TAG_BOOL as i64);
+                builder.ins().select(ge, true_raw, false_raw)
+            }
+        };
+        builder.ins().jump(merge_block, &[fast_result]);
+
+        // ---- slow path ----
+        builder.switch_to_block(slow_block);
+        builder.seal_block(slow_block);
+        let op_c = builder.ins().iconst(types::I64, bop_code as i64);
+        let call = builder.ins().call(helpers.binary_op, &[a, b, op_c]);
+        let slow_result = builder.inst_results(call)[0];
+        builder.ins().jump(merge_block, &[slow_result]);
+
+        // ---- merge ----
+        builder.switch_to_block(merge_block);
+        builder.seal_block(merge_block);
+        builder.block_params(merge_block)[0]
+    }
+
     fn compile(
         builder: &mut FunctionBuilder,
         chunk: &Chunk,
         self_ref: cranelift_codegen::ir::FuncRef,
         helpers: &HelperRefs,
-        _chunk_idx: usize,
+        chunk_idx: usize,
     ) -> bool {
         let code = &chunk.code;
 
@@ -1459,7 +1548,7 @@ impl GenericJitCompiler {
             vars.push(var);
         }
 
-        // Init params
+        // Init params (no offset — context is in thread-locals)
         for i in 0..chunk.param_count as usize {
             let param_val = builder.block_params(entry)[i];
             builder.def_var(vars[i], param_val);
@@ -1474,16 +1563,12 @@ impl GenericJitCompiler {
         // Seal entry block
         builder.seal_block(entry);
 
-        // We'll also need stack memory for passing args arrays to helpers.
-        // Cranelift stack slots for temporary arrays (max 256 items).
-        // No stack slot needed — opcodes that need arrays (MakeList etc.) bail to VM
-
         // Virtual operand stack
         let mut vstack: Vec<cranelift_codegen::ir::Value> = Vec::new();
 
         // --- Phase 3: Translate opcodes ---
         let mut pc = 0;
-        let mut block_sealed: HashSet<cranelift_codegen::ir::Block> = HashSet::new();
+        let block_sealed: HashSet<cranelift_codegen::ir::Block> = HashSet::new();
         let mut terminated = false;
 
         while pc < code.len() {
@@ -1606,20 +1691,16 @@ impl GenericJitCompiler {
                 }
 
                 Op::GetGlobal => {
-                    let idx = chunk.read_u16(pc) as usize; pc += 2;
-                    // We don't have vm_ptr in the JIT'd function — bail for now
-                    // Actually, we need to pass vm_ptr and interp_ptr as hidden parameters.
-                    // But that would change the calling convention...
-                    // For functions that need VM/Interp access, we must bail.
-                    // However, the instruction says to handle ALL opcodes.
-                    // The pragmatic solution: bail on opcodes that need VM/Interp pointers
-                    // from within a JIT'd function. These opcodes only appear in top-level
-                    // code (chunk 0) which has param_count=0 and won't be JIT'd anyway.
-                    return false;
+                    let idx = chunk.read_u16(pc) as u64; pc += 2;
+                    let idx_val = builder.ins().iconst(types::I64, idx as i64);
+                    let call = builder.ins().call(helpers.get_global, &[idx_val]);
+                    vstack.push(builder.inst_results(call)[0]);
                 }
                 Op::SetGlobal => {
-                    let _idx = chunk.read_u16(pc) as usize; pc += 2;
-                    return false;
+                    let idx = chunk.read_u16(pc) as u64; pc += 2;
+                    let val = match vstack.pop() { Some(v) => v, None => return false };
+                    let idx_val = builder.ins().iconst(types::I64, idx as i64);
+                    builder.ins().call(helpers.set_global, &[idx_val, val]);
                 }
 
                 // ============================================================
@@ -1628,37 +1709,27 @@ impl GenericJitCompiler {
                 Op::Add | Op::AddInt => {
                     let b = match vstack.pop() { Some(v) => v, None => return false };
                     let a = match vstack.pop() { Some(v) => v, None => return false };
-                    let op_c = builder.ins().iconst(types::I64, BOP_ADD as i64);
-                    let call = builder.ins().call(helpers.binary_op, &[a, b, op_c]);
-                    vstack.push(builder.inst_results(call)[0]);
+                    vstack.push(Self::emit_int_binop(builder, helpers, a, b, IntFastOp::Add, BOP_ADD));
                 }
                 Op::Sub | Op::SubInt => {
                     let b = match vstack.pop() { Some(v) => v, None => return false };
                     let a = match vstack.pop() { Some(v) => v, None => return false };
-                    let op_c = builder.ins().iconst(types::I64, BOP_SUB as i64);
-                    let call = builder.ins().call(helpers.binary_op, &[a, b, op_c]);
-                    vstack.push(builder.inst_results(call)[0]);
+                    vstack.push(Self::emit_int_binop(builder, helpers, a, b, IntFastOp::Sub, BOP_SUB));
                 }
                 Op::Mul | Op::MulInt => {
                     let b = match vstack.pop() { Some(v) => v, None => return false };
                     let a = match vstack.pop() { Some(v) => v, None => return false };
-                    let op_c = builder.ins().iconst(types::I64, BOP_MUL as i64);
-                    let call = builder.ins().call(helpers.binary_op, &[a, b, op_c]);
-                    vstack.push(builder.inst_results(call)[0]);
+                    vstack.push(Self::emit_int_binop(builder, helpers, a, b, IntFastOp::Mul, BOP_MUL));
                 }
                 Op::Div | Op::DivInt => {
                     let b = match vstack.pop() { Some(v) => v, None => return false };
                     let a = match vstack.pop() { Some(v) => v, None => return false };
-                    let op_c = builder.ins().iconst(types::I64, BOP_DIV as i64);
-                    let call = builder.ins().call(helpers.binary_op, &[a, b, op_c]);
-                    vstack.push(builder.inst_results(call)[0]);
+                    vstack.push(Self::emit_int_binop(builder, helpers, a, b, IntFastOp::Div, BOP_DIV));
                 }
                 Op::Mod | Op::ModInt => {
                     let b = match vstack.pop() { Some(v) => v, None => return false };
                     let a = match vstack.pop() { Some(v) => v, None => return false };
-                    let op_c = builder.ins().iconst(types::I64, BOP_MOD as i64);
-                    let call = builder.ins().call(helpers.binary_op, &[a, b, op_c]);
-                    vstack.push(builder.inst_results(call)[0]);
+                    vstack.push(Self::emit_int_binop(builder, helpers, a, b, IntFastOp::Mod, BOP_MOD));
                 }
                 Op::Pow => {
                     let b = match vstack.pop() { Some(v) => v, None => return false };
@@ -1678,44 +1749,32 @@ impl GenericJitCompiler {
                 Op::Eq | Op::EqInt => {
                     let b = match vstack.pop() { Some(v) => v, None => return false };
                     let a = match vstack.pop() { Some(v) => v, None => return false };
-                    let op_c = builder.ins().iconst(types::I64, BOP_EQ as i64);
-                    let call = builder.ins().call(helpers.binary_op, &[a, b, op_c]);
-                    vstack.push(builder.inst_results(call)[0]);
+                    vstack.push(Self::emit_int_binop(builder, helpers, a, b, IntFastOp::Eq, BOP_EQ));
                 }
                 Op::Neq | Op::NeqInt => {
                     let b = match vstack.pop() { Some(v) => v, None => return false };
                     let a = match vstack.pop() { Some(v) => v, None => return false };
-                    let op_c = builder.ins().iconst(types::I64, BOP_NEQ as i64);
-                    let call = builder.ins().call(helpers.binary_op, &[a, b, op_c]);
-                    vstack.push(builder.inst_results(call)[0]);
+                    vstack.push(Self::emit_int_binop(builder, helpers, a, b, IntFastOp::Neq, BOP_NEQ));
                 }
                 Op::Lt | Op::LtInt => {
                     let b = match vstack.pop() { Some(v) => v, None => return false };
                     let a = match vstack.pop() { Some(v) => v, None => return false };
-                    let op_c = builder.ins().iconst(types::I64, BOP_LT as i64);
-                    let call = builder.ins().call(helpers.binary_op, &[a, b, op_c]);
-                    vstack.push(builder.inst_results(call)[0]);
+                    vstack.push(Self::emit_int_binop(builder, helpers, a, b, IntFastOp::Lt, BOP_LT));
                 }
                 Op::Gt | Op::GtInt => {
                     let b = match vstack.pop() { Some(v) => v, None => return false };
                     let a = match vstack.pop() { Some(v) => v, None => return false };
-                    let op_c = builder.ins().iconst(types::I64, BOP_GT as i64);
-                    let call = builder.ins().call(helpers.binary_op, &[a, b, op_c]);
-                    vstack.push(builder.inst_results(call)[0]);
+                    vstack.push(Self::emit_int_binop(builder, helpers, a, b, IntFastOp::Gt, BOP_GT));
                 }
                 Op::Lte | Op::LteInt => {
                     let b = match vstack.pop() { Some(v) => v, None => return false };
                     let a = match vstack.pop() { Some(v) => v, None => return false };
-                    let op_c = builder.ins().iconst(types::I64, BOP_LTE as i64);
-                    let call = builder.ins().call(helpers.binary_op, &[a, b, op_c]);
-                    vstack.push(builder.inst_results(call)[0]);
+                    vstack.push(Self::emit_int_binop(builder, helpers, a, b, IntFastOp::Lte, BOP_LTE));
                 }
                 Op::Gte | Op::GteInt => {
                     let b = match vstack.pop() { Some(v) => v, None => return false };
                     let a = match vstack.pop() { Some(v) => v, None => return false };
-                    let op_c = builder.ins().iconst(types::I64, BOP_GTE as i64);
-                    let call = builder.ins().call(helpers.binary_op, &[a, b, op_c]);
-                    vstack.push(builder.inst_results(call)[0]);
+                    vstack.push(Self::emit_int_binop(builder, helpers, a, b, IntFastOp::Gte, BOP_GTE));
                 }
 
                 // ============================================================
@@ -1868,20 +1927,27 @@ impl GenericJitCompiler {
                     let imm = chunk.read_i64(pc); pc += 8;
                     if slot >= vars.len() { return false; }
                     let v = builder.use_var(vars[slot]);
-                    let imm_v = builder.ins().iconst(types::I64, imm);
-                    let op_c = builder.ins().iconst(types::I64, 0); // sub
-                    let call = builder.ins().call(helpers.local_imm_op, &[v, imm_v, op_c]);
-                    vstack.push(builder.inst_results(call)[0]);
+                    // Native: extract payload, subtract, re-tag
+                    let payload = builder.ins().band_imm(v, NB_PAYLOAD_MASK as i64);
+                    let sign_ext = builder.ins().ishl_imm(payload, 16);
+                    let sign_ext = builder.ins().sshr_imm(sign_ext, 16);
+                    let result = builder.ins().iadd_imm(sign_ext, -imm);
+                    let masked = builder.ins().band_imm(result, NB_PAYLOAD_MASK as i64);
+                    let tagged = builder.ins().bor_imm(masked, NB_TAG_INT as i64);
+                    vstack.push(tagged);
                 }
                 Op::AddLocalImm => {
                     let slot = chunk.read_u16(pc) as usize; pc += 2;
                     let imm = chunk.read_i64(pc); pc += 8;
                     if slot >= vars.len() { return false; }
                     let v = builder.use_var(vars[slot]);
-                    let imm_v = builder.ins().iconst(types::I64, imm);
-                    let op_c = builder.ins().iconst(types::I64, 1); // add
-                    let call = builder.ins().call(helpers.local_imm_op, &[v, imm_v, op_c]);
-                    vstack.push(builder.inst_results(call)[0]);
+                    let payload = builder.ins().band_imm(v, NB_PAYLOAD_MASK as i64);
+                    let sign_ext = builder.ins().ishl_imm(payload, 16);
+                    let sign_ext = builder.ins().sshr_imm(sign_ext, 16);
+                    let result = builder.ins().iadd_imm(sign_ext, imm);
+                    let masked = builder.ins().band_imm(result, NB_PAYLOAD_MASK as i64);
+                    let tagged = builder.ins().bor_imm(masked, NB_TAG_INT as i64);
+                    vstack.push(tagged);
                 }
                 Op::BranchIfLocalGtImm => {
                     let slot = chunk.read_u16(pc) as usize; pc += 2;
@@ -1889,12 +1955,12 @@ impl GenericJitCompiler {
                     let offset = chunk.read_i32(pc); pc += 4;
                     if slot >= vars.len() { return false; }
                     let v = builder.use_var(vars[slot]);
-                    let imm_v = builder.ins().iconst(types::I64, imm);
-                    let op_c = builder.ins().iconst(types::I64, 0); // gt
-                    let call = builder.ins().call(helpers.branch_local_imm, &[v, imm_v, op_c]);
-                    let result = builder.inst_results(call)[0];
-                    let z = builder.ins().iconst(types::I64, 0);
-                    let cmp = builder.ins().icmp(IntCC::NotEqual, result, z);
+                    // Native: extract, sign-extend, compare
+                    let payload = builder.ins().band_imm(v, NB_PAYLOAD_MASK as i64);
+                    let sign_ext = builder.ins().ishl_imm(payload, 16);
+                    let sign_ext = builder.ins().sshr_imm(sign_ext, 16);
+                    let imm_val = builder.ins().iconst(types::I64, imm);
+                    let cmp = builder.ins().icmp(IntCC::SignedGreaterThan, sign_ext, imm_val);
                     let target_pc = (pc as i32 + offset) as usize;
                     let target_block = match block_map.get(&target_pc) { Some(&b) => b, None => return false };
                     let fall_block = match block_map.get(&pc) { Some(&b) => b, None => return false };
@@ -1907,12 +1973,11 @@ impl GenericJitCompiler {
                     let offset = chunk.read_i32(pc); pc += 4;
                     if slot >= vars.len() { return false; }
                     let v = builder.use_var(vars[slot]);
-                    let imm_v = builder.ins().iconst(types::I64, imm);
-                    let op_c = builder.ins().iconst(types::I64, 1); // lte
-                    let call = builder.ins().call(helpers.branch_local_imm, &[v, imm_v, op_c]);
-                    let result = builder.inst_results(call)[0];
-                    let z = builder.ins().iconst(types::I64, 0);
-                    let cmp = builder.ins().icmp(IntCC::NotEqual, result, z);
+                    let payload = builder.ins().band_imm(v, NB_PAYLOAD_MASK as i64);
+                    let sign_ext = builder.ins().ishl_imm(payload, 16);
+                    let sign_ext = builder.ins().sshr_imm(sign_ext, 16);
+                    let imm_val = builder.ins().iconst(types::I64, imm);
+                    let cmp = builder.ins().icmp(IntCC::SignedLessThanOrEqual, sign_ext, imm_val);
                     let target_pc = (pc as i32 + offset) as usize;
                     let target_block = match block_map.get(&target_pc) { Some(&b) => b, None => return false };
                     let fall_block = match block_map.get(&pc) { Some(&b) => b, None => return false };
@@ -1978,29 +2043,91 @@ impl GenericJitCompiler {
                 // ============================================================
                 Op::CallLocal => {
                     let target = chunk.read_u16(pc) as usize; pc += 2;
-                    let argc = code[pc]; pc += 1;
+                    let argc = code[pc] as usize; pc += 1;
                     let mut args = Vec::new();
                     for _ in 0..argc {
                         match vstack.pop() { Some(v) => args.push(v), None => return false }
                     }
                     args.reverse();
-                    // Self-recursive call
-                    let call = builder.ins().call(self_ref, &args);
-                    vstack.push(builder.inst_results(call)[0]);
+                    if target == chunk_idx {
+                        // Self-recursive call — context is in thread-locals
+                        let call = builder.ins().call(self_ref, &args);
+                        vstack.push(builder.inst_results(call)[0]);
+                    } else {
+                        // Call a different function via vm_call helper
+                        let target_val = builder.ins().iconst(types::I64, target as i64);
+                        if argc == 0 {
+                            let null_ptr = builder.ins().iconst(types::I64, 0);
+                            let argc_val = builder.ins().iconst(types::I64, 0);
+                            let call = builder.ins().call(helpers.vm_call, &[target_val, null_ptr, argc_val]);
+                            vstack.push(builder.inst_results(call)[0]);
+                        } else {
+                            let slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, (argc * 8) as u32, 3));
+                            for (i, val) in args.iter().enumerate() {
+                                builder.ins().stack_store(*val, slot, (i * 8) as i32);
+                            }
+                            let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                            let argc_val = builder.ins().iconst(types::I64, argc as i64);
+                            let call = builder.ins().call(helpers.vm_call, &[target_val, ptr, argc_val]);
+                            vstack.push(builder.inst_results(call)[0]);
+                        }
+                    }
                 }
                 Op::Call => {
-                    // Needs VM and interpreter — bail for now
-                    // (Call opcode in non-top-level chunks is rare; CallLocal is used for known targets)
-                    let _name_idx = chunk.read_u16(pc); pc += 2;
-                    let _argc = code[pc]; pc += 1;
-                    let _res = code[pc]; pc += 1;
-                    return false;
+                    let name_idx = chunk.read_u16(pc) as u64; pc += 2;
+                    let argc = code[pc] as usize; pc += 1;
+                    let res = code[pc] as u64; pc += 1;
+                    let mut args = Vec::new();
+                    for _ in 0..argc {
+                        match vstack.pop() { Some(v) => args.push(v), None => return false }
+                    }
+                    args.reverse();
+                    // Store args in a stack slot
+                    if argc == 0 {
+                        let null_ptr = builder.ins().iconst(types::I64, 0);
+                        let name_idx_val = builder.ins().iconst(types::I64, name_idx as i64);
+                        let res_val = builder.ins().iconst(types::I64, res as i64);
+                        let argc_val = builder.ins().iconst(types::I64, 0);
+                        let call = builder.ins().call(helpers.generic_call, &[name_idx_val, res_val, null_ptr, argc_val]);
+                        vstack.push(builder.inst_results(call)[0]);
+                    } else {
+                        let slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, (argc * 8) as u32, 3));
+                        for (i, val) in args.iter().enumerate() {
+                            builder.ins().stack_store(*val, slot, (i * 8) as i32);
+                        }
+                        let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                        let name_idx_val = builder.ins().iconst(types::I64, name_idx as i64);
+                        let res_val = builder.ins().iconst(types::I64, res as i64);
+                        let argc_val = builder.ins().iconst(types::I64, argc as i64);
+                        let call = builder.ins().call(helpers.generic_call, &[name_idx_val, res_val, ptr, argc_val]);
+                        vstack.push(builder.inst_results(call)[0]);
+                    }
                 }
                 Op::CallBuiltin => {
-                    // Needs interpreter — bail
-                    let _name_idx = chunk.read_u16(pc); pc += 2;
-                    let _argc = code[pc]; pc += 1;
-                    return false;
+                    let name_idx = chunk.read_u16(pc) as u64; pc += 2;
+                    let argc = code[pc] as usize; pc += 1;
+                    let mut args = Vec::new();
+                    for _ in 0..argc {
+                        match vstack.pop() { Some(v) => args.push(v), None => return false }
+                    }
+                    args.reverse();
+                    if argc == 0 {
+                        let null_ptr = builder.ins().iconst(types::I64, 0);
+                        let name_idx_val = builder.ins().iconst(types::I64, name_idx as i64);
+                        let argc_val = builder.ins().iconst(types::I64, 0);
+                        let call = builder.ins().call(helpers.call_builtin, &[name_idx_val, null_ptr, argc_val]);
+                        vstack.push(builder.inst_results(call)[0]);
+                    } else {
+                        let slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, (argc * 8) as u32, 3));
+                        for (i, val) in args.iter().enumerate() {
+                            builder.ins().stack_store(*val, slot, (i * 8) as i32);
+                        }
+                        let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                        let name_idx_val = builder.ins().iconst(types::I64, name_idx as i64);
+                        let argc_val = builder.ins().iconst(types::I64, argc as i64);
+                        let call = builder.ins().call(helpers.call_builtin, &[name_idx_val, ptr, argc_val]);
+                        vstack.push(builder.inst_results(call)[0]);
+                    }
                 }
                 Op::Return => {
                     let val = match vstack.pop() { Some(v) => v, None => return false };
@@ -2032,16 +2159,83 @@ impl GenericJitCompiler {
                 // These are uncommon in hot inner loops.
                 // ============================================================
                 Op::MakeList => {
-                    let _count = chunk.read_u16(pc); pc += 2;
-                    return false; // needs stack slot for passing array to helper
+                    let count = chunk.read_u16(pc) as usize; pc += 2;
+                    if count == 0 {
+                        // Empty list: pass null pointer with count 0
+                        let null_ptr = builder.ins().iconst(types::I64, 0);
+                        let count_val = builder.ins().iconst(types::I64, 0);
+                        let call = builder.ins().call(helpers.make_list, &[null_ptr, count_val]);
+                        vstack.push(builder.inst_results(call)[0]);
+                    } else {
+                        let slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, (count * 8) as u32, 3));
+                        // Pop items in reverse (last pushed = highest index)
+                        let mut items = Vec::with_capacity(count);
+                        for _ in 0..count {
+                            match vstack.pop() { Some(v) => items.push(v), None => return false }
+                        }
+                        items.reverse();
+                        for (i, val) in items.iter().enumerate() {
+                            builder.ins().stack_store(*val, slot, (i * 8) as i32);
+                        }
+                        let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                        let count_val = builder.ins().iconst(types::I64, count as i64);
+                        let call = builder.ins().call(helpers.make_list, &[ptr, count_val]);
+                        vstack.push(builder.inst_results(call)[0]);
+                    }
                 }
                 Op::MakeObject => {
-                    let _count = chunk.read_u16(pc); pc += 2;
-                    return false; // needs stack slot for passing array to helper
+                    let count = chunk.read_u16(pc) as usize; pc += 2;
+                    // count = number of key-value pairs, need count*2 slots
+                    if count == 0 {
+                        let null_ptr = builder.ins().iconst(types::I64, 0);
+                        let count_val = builder.ins().iconst(types::I64, 0);
+                        let call = builder.ins().call(helpers.make_object, &[null_ptr, count_val]);
+                        vstack.push(builder.inst_results(call)[0]);
+                    } else {
+                        let slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, (count * 2 * 8) as u32, 3));
+                        // Pop pairs in reverse: each pair is (key, value) — value on top
+                        // vstack top to bottom: val_n, key_n, ..., val_0, key_0
+                        // We need in memory: key_0, val_0, key_1, val_1, ...
+                        let mut pairs = Vec::with_capacity(count);
+                        for _ in 0..count {
+                            let val = match vstack.pop() { Some(v) => v, None => return false };
+                            let key = match vstack.pop() { Some(v) => v, None => return false };
+                            pairs.push((key, val));
+                        }
+                        pairs.reverse();
+                        for (i, (key, val)) in pairs.iter().enumerate() {
+                            builder.ins().stack_store(*key, slot, (i * 2 * 8) as i32);
+                            builder.ins().stack_store(*val, slot, (i * 2 * 8 + 8) as i32);
+                        }
+                        let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                        let count_val = builder.ins().iconst(types::I64, count as i64);
+                        let call = builder.ins().call(helpers.make_object, &[ptr, count_val]);
+                        vstack.push(builder.inst_results(call)[0]);
+                    }
                 }
                 Op::MakeString => {
-                    let _count = chunk.read_u16(pc); pc += 2;
-                    return false; // needs stack slot for passing array to helper
+                    let count = chunk.read_u16(pc) as usize; pc += 2;
+                    if count == 0 {
+                        // Empty string
+                        let null_ptr = builder.ins().iconst(types::I64, 0);
+                        let count_val = builder.ins().iconst(types::I64, 0);
+                        let call = builder.ins().call(helpers.make_string, &[null_ptr, count_val]);
+                        vstack.push(builder.inst_results(call)[0]);
+                    } else {
+                        let slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, (count * 8) as u32, 3));
+                        let mut parts = Vec::with_capacity(count);
+                        for _ in 0..count {
+                            match vstack.pop() { Some(v) => parts.push(v), None => return false }
+                        }
+                        parts.reverse();
+                        for (i, val) in parts.iter().enumerate() {
+                            builder.ins().stack_store(*val, slot, (i * 8) as i32);
+                        }
+                        let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                        let count_val = builder.ins().iconst(types::I64, count as i64);
+                        let call = builder.ins().call(helpers.make_string, &[ptr, count_val]);
+                        vstack.push(builder.inst_results(call)[0]);
+                    }
                 }
                 Op::MakeRange => {
                     // MakeRange has no operand — just pops start and end from stack
@@ -2063,13 +2257,18 @@ impl GenericJitCompiler {
                     builder.ins().call(helpers.index_set, &[target, idx, val]);
                 }
                 Op::FieldGet => {
-                    let _idx = chunk.read_u16(pc); pc += 2;
-                    // Needs chunk constants — bail (requires vm_ptr)
-                    return false;
+                    let field_idx = chunk.read_u16(pc) as u64; pc += 2;
+                    let obj = match vstack.pop() { Some(v) => v, None => return false };
+                    let field_idx_val = builder.ins().iconst(types::I64, field_idx as i64);
+                    let call = builder.ins().call(helpers.field_get, &[obj, field_idx_val]);
+                    vstack.push(builder.inst_results(call)[0]);
                 }
                 Op::FieldSet => {
-                    let _idx = chunk.read_u16(pc); pc += 2;
-                    return false;
+                    let field_idx = chunk.read_u16(pc) as u64; pc += 2;
+                    let val = match vstack.pop() { Some(v) => v, None => return false };
+                    let obj = match vstack.pop() { Some(v) => v, None => return false };
+                    let field_idx_val = builder.ins().iconst(types::I64, field_idx as i64);
+                    builder.ins().call(helpers.field_set, &[obj, field_idx_val, val]);
                 }
 
                 // ============================================================
@@ -2078,93 +2277,146 @@ impl GenericJitCompiler {
                 //  param_count=0 and are not JIT candidates anyway.)
                 // ============================================================
                 Op::DefineFunction => {
-                    let _name_idx = chunk.read_u16(pc); pc += 2;
-                    let _fn_chunk = chunk.read_u16(pc); pc += 2;
-                    return false; // needs vm
+                    let name_idx = chunk.read_u16(pc) as u64; pc += 2;
+                    let fn_chunk = chunk.read_u16(pc) as u64; pc += 2;
+                    let name_idx_val = builder.ins().iconst(types::I64, name_idx as i64);
+                    let fn_chunk_val = builder.ins().iconst(types::I64, fn_chunk as i64);
+                    builder.ins().call(helpers.define_function, &[name_idx_val, fn_chunk_val]);
                 }
                 Op::DefineEnum => {
                     pc += 2; // global_slot
                     if pc + 1 < code.len() {
                         let count = u16::from_le_bytes([code[pc], code[pc+1]]) as usize;
-                        pc += 2 + count * 2;
+                        let _ = 2 + count * 2; // skip enum data (return false follows)
                     }
                     return false; // needs vm
                 }
                 Op::Import => {
-                    let _path_idx = chunk.read_u16(pc); pc += 2;
-                    return false; // complex
+                    let _path_idx = chunk.read_u16(pc); 
+                    return false; // complex — involves file loading, parsing, compilation
                 }
                 Op::Free => {
-                    let _idx = chunk.read_u16(pc); pc += 2;
-                    return false; // needs vm
+                    let idx = chunk.read_u16(pc) as u64; pc += 2;
+                    let idx_val = builder.ins().iconst(types::I64, idx as i64);
+                    builder.ins().call(helpers.free_global, &[idx_val]);
                 }
                 Op::Alias => {
-                    let _name_idx = chunk.read_u16(pc); pc += 2;
-                    let _target_idx = chunk.read_u16(pc); pc += 2;
-                    return false; // needs interp
+                    let name_idx = chunk.read_u16(pc) as u64; pc += 2;
+                    let target_idx = chunk.read_u16(pc) as u64; pc += 2;
+                    let name_idx_val = builder.ins().iconst(types::I64, name_idx as i64);
+                    let target_idx_val = builder.ins().iconst(types::I64, target_idx as i64);
+                    builder.ins().call(helpers.alias, &[name_idx_val, target_idx_val]);
                 }
                 Op::Use => {
-                    let _path_idx = chunk.read_u16(pc); pc += 2;
-                    let _alias_idx = chunk.read_u16(pc); pc += 2;
-                    return false; // needs interp
+                    let path_idx = chunk.read_u16(pc) as u64; pc += 2;
+                    let alias_idx = chunk.read_u16(pc) as u64; pc += 2;
+                    let path_idx_val = builder.ins().iconst(types::I64, path_idx as i64);
+                    let alias_idx_val = builder.ins().iconst(types::I64, alias_idx as i64);
+                    builder.ins().call(helpers.use_fn, &[path_idx_val, alias_idx_val]);
                 }
                 Op::Throw => {
-                    let _val = match vstack.pop() { Some(v) => v, None => return false };
-                    // Throw needs to unwind — bail
-                    return false;
+                    let val = match vstack.pop() { Some(v) => v, None => return false };
+                    let call = builder.ins().call(helpers.throw, &[val]);
+                    // Throw returns void; push result and continue (simplified error handling)
+                    vstack.push(builder.inst_results(call)[0]);
                 }
                 Op::TryBegin => {
-                    let _offset = chunk.read_i32(pc); pc += 4;
+                    let _offset = chunk.read_i32(pc);
                     return false; // complex control flow
                 }
                 Op::TryEnd => {
-                    let _offset = chunk.read_i32(pc); pc += 4;
+                    let _offset = chunk.read_i32(pc);
                     return false;
                 }
                 Op::MakeLambda => {
-                    let _name_idx = chunk.read_u16(pc); pc += 2;
-                    let _res = code[pc]; pc += 1;
-                    let _bound_count = code[pc]; pc += 1;
-                    return false; // needs chunks_ptr
+                    let name_idx = chunk.read_u16(pc) as u64; pc += 2;
+                    let res = code[pc] as u64; pc += 1;
+                    let bound_count = code[pc] as usize; pc += 1;
+                    let mut bound_args = Vec::new();
+                    for _ in 0..bound_count {
+                        match vstack.pop() { Some(v) => bound_args.push(v), None => return false }
+                    }
+                    bound_args.reverse();
+                    if bound_count == 0 {
+                        let null_ptr = builder.ins().iconst(types::I64, 0);
+                        let name_idx_val = builder.ins().iconst(types::I64, name_idx as i64);
+                        let res_val = builder.ins().iconst(types::I64, res as i64);
+                        let count_val = builder.ins().iconst(types::I64, 0);
+                        let call = builder.ins().call(helpers.make_lambda, &[name_idx_val, res_val, null_ptr, count_val]);
+                        vstack.push(builder.inst_results(call)[0]);
+                    } else {
+                        let slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, (bound_count * 8) as u32, 3));
+                        for (i, val) in bound_args.iter().enumerate() {
+                            builder.ins().stack_store(*val, slot, (i * 8) as i32);
+                        }
+                        let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                        let name_idx_val = builder.ins().iconst(types::I64, name_idx as i64);
+                        let res_val = builder.ins().iconst(types::I64, res as i64);
+                        let count_val = builder.ins().iconst(types::I64, bound_count as i64);
+                        let call = builder.ins().call(helpers.make_lambda, &[name_idx_val, res_val, ptr, count_val]);
+                        vstack.push(builder.inst_results(call)[0]);
+                    }
                 }
                 Op::ErrorCheck => {
-                    let _slot = chunk.read_u16(pc); pc += 2;
-                    return false; // needs vm
+                    let slot = chunk.read_u16(pc) as u64; pc += 2;
+                    let slot_val = builder.ins().iconst(types::I64, slot as i64);
+                    let call = builder.ins().call(helpers.error_check, &[slot_val]);
+                    vstack.push(builder.inst_results(call)[0]);
                 }
                 Op::ErrorField => {
-                    let _slot = chunk.read_u16(pc); pc += 2;
+                    let slot = chunk.read_u16(pc) as u64; pc += 2;
                     let _field_idx = chunk.read_u16(pc); pc += 2;
-                    return false; // needs vm
+                    let slot_val = builder.ins().iconst(types::I64, slot as i64);
+                    let call = builder.ins().call(helpers.error_field, &[slot_val]);
+                    vstack.push(builder.inst_results(call)[0]);
                 }
                 Op::SetErrorTolerant => {
-                    let _slot = chunk.read_u16(pc); pc += 2;
-                    return false; // needs vm
+                    let slot = chunk.read_u16(pc) as u64; pc += 2;
+                    let slot_val = builder.ins().iconst(types::I64, slot as i64);
+                    builder.ins().call(helpers.set_error_tolerant, &[slot_val]);
                 }
                 Op::RecordError => {
-                    let _slot = chunk.read_u16(pc); pc += 2;
-                    return false; // needs vm
+                    let slot = chunk.read_u16(pc) as u64; pc += 2;
+                    let slot_val = builder.ins().iconst(types::I64, slot as i64);
+                    builder.ins().call(helpers.record_error, &[slot_val]);
                 }
                 Op::OptionalCheck => {
-                    let _slot = chunk.read_u16(pc); pc += 2;
-                    return false; // needs vm
+                    let slot = chunk.read_u16(pc) as u64; pc += 2;
+                    let slot_val = builder.ins().iconst(types::I64, slot as i64);
+                    let call = builder.ins().call(helpers.optional_check, &[slot_val]);
+                    vstack.push(builder.inst_results(call)[0]);
                 }
                 Op::Atomic => {
-                    return false; // needs vm
+                    let val = match vstack.pop() { Some(v) => v, None => return false };
+                    let call = builder.ins().call(helpers.atomic, &[val]);
+                    vstack.push(builder.inst_results(call)[0]);
                 }
 
                 // ============================================================
                 // SEND CONTEXT — needs vm
                 // ============================================================
-                Op::PushSendCtx | Op::PopSendCtx | Op::GetDollar => {
-                    return false;
+                Op::PushSendCtx => {
+                    let val = match vstack.pop() { Some(v) => v, None => return false };
+                    builder.ins().call(helpers.push_send_ctx, &[val]);
+                }
+                Op::PopSendCtx => {
+                    builder.ins().call(helpers.pop_send_ctx, &[]);
+                }
+                Op::GetDollar => {
+                    let call = builder.ins().call(helpers.get_dollar, &[]);
+                    vstack.push(builder.inst_results(call)[0]);
                 }
                 Op::GetDollarIndex => {
-                    let _idx = chunk.read_u16(pc); pc += 2;
-                    return false;
+                    let idx = chunk.read_u16(pc) as u64; pc += 2;
+                    let idx_val = builder.ins().iconst(types::I64, idx as i64);
+                    let call = builder.ins().call(helpers.get_dollar_index, &[idx_val]);
+                    vstack.push(builder.inst_results(call)[0]);
                 }
                 Op::GetDollarField => {
-                    let _field_idx = chunk.read_u16(pc); pc += 2;
-                    return false;
+                    let field_idx = chunk.read_u16(pc) as u64; pc += 2;
+                    let field_idx_val = builder.ins().iconst(types::I64, field_idx as i64);
+                    let call = builder.ins().call(helpers.get_dollar_field, &[field_idx_val]);
+                    vstack.push(builder.inst_results(call)[0]);
                 }
 
                 // ============================================================

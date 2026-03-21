@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::borrow::Cow;
-use crate::interpreter::value::{MaybeError, ObjectData, Value};
+use crate::interpreter::value::{MaybeError, ObjectData};
 use crate::parser::ast::{Stmt, TypeAnnotation};
 
 /// Lowercase a string, avoiding allocation if it's already lowercase.

@@ -533,7 +533,7 @@ impl Value {
         unsafe { Some(&*ptr) }
     }
 
-    fn as_heap_mut(&self) -> Option<&mut HeapValue> {
+    fn _as_heap_mut(&self) -> Option<&mut HeapValue> {
         if self.tag() != TAG_BOXED { return None; }
         let ptr = self.payload() as *mut HeapValue;
         if ptr.is_null() { return None; }

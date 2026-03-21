@@ -20,6 +20,10 @@ pub struct Interpreter {
     execution_mode: crate::vm::ExecutionMode,
     /// Whether any code has been executed (locks execution mode)
     has_executed: bool,
+    /// When true, scripts cannot call external executables (alias, use, exe resolution)
+    allow_exec: bool,
+    /// When true, standard builtins are available. When false, only user-registered functions work.
+    allow_builtins: bool,
 }
 
 /// Return control flow signal
@@ -40,7 +44,23 @@ impl Interpreter {
             cancel_flag: None,
             execution_mode: crate::vm::ExecutionMode::Auto,
             has_executed: false,
+            allow_exec: true,
+            allow_builtins: true,
         })
+    }
+
+    /// Disable external executable access. Scripts cannot call system commands.
+    pub fn set_allow_exec(&mut self, allow: bool) {
+        self.allow_exec = allow;
+    }
+
+    /// Disable standard builtins. Only user-registered functions are available.
+    /// Call this BEFORE run_source/run_file.
+    pub fn set_allow_builtins(&mut self, allow: bool) {
+        self.allow_builtins = allow;
+        if !allow {
+            self.registry = crate::builtins::registry::BuiltinRegistry::empty();
+        }
     }
 
     /// Set the execution mode. Must be called before any code is executed.
@@ -1002,20 +1022,24 @@ impl Interpreter {
         match resolution {
             Resolution::Normal => {
                 // alias → use_paths → exe → own → system
-                if let Some(target) = self.env.aliases.get(lower).cloned() {
-                    return exec::exec_path(&target, &args);
-                }
-                if let Some(use_path) = self.env.use_paths.get(lower).cloned() {
-                    return exec::exec_path(&use_path, &args);
-                }
-                if let Some(result) = exec::try_exec_command(lower, &args) {
-                    return result;
+                if self.allow_exec {
+                    if let Some(target) = self.env.aliases.get(lower).cloned() {
+                        return exec::exec_path(&target, &args);
+                    }
+                    if let Some(use_path) = self.env.use_paths.get(lower).cloned() {
+                        return exec::exec_path(&use_path, &args);
+                    }
+                    if let Some(result) = exec::try_exec_command(lower, &args) {
+                        return result;
+                    }
                 }
                 if let Some(result) = self.call_user_fn(lower, args.clone()) {
                     return result;
                 }
-                if let Some(result) = self.call_builtin(lower, &args) {
-                    return result;
+                if self.allow_builtins {
+                    if let Some(result) = self.call_builtin(lower, &args) {
+                        return result;
+                    }
                 }
                 Err(format!("Undefined: '{name}' (not found as exe, function, or built-in)"))
             }
@@ -1024,15 +1048,19 @@ impl Interpreter {
                 if let Some(result) = self.call_user_fn(lower, args.clone()) {
                     return result;
                 }
-                if let Some(result) = self.call_builtin(lower, &args) {
-                    return result;
+                if self.allow_builtins {
+                    if let Some(result) = self.call_builtin(lower, &args) {
+                        return result;
+                    }
                 }
                 Err(format!("Undefined: '{name}' (not found as function or built-in)"))
             }
             Resolution::SystemOnly => {
                 // system only
-                if let Some(result) = self.call_builtin(lower, &args) {
-                    return result;
+                if self.allow_builtins {
+                    if let Some(result) = self.call_builtin(lower, &args) {
+                        return result;
+                    }
                 }
                 Err(format!("Undefined: '{name}' (not a built-in function)"))
             }

@@ -22,7 +22,7 @@ struct TryPoint {
     /// Stack depth to restore.
     stack_depth: usize,
     /// Last error message (set when error is caught).
-    error_msg: Option<String>,
+    _error_msg: Option<String>,
 }
 
 pub struct VM {
@@ -81,7 +81,7 @@ impl VM {
 
     /// Run a single frame and return its result value. Used by JIT helpers.
     pub(crate) fn run_frame(&mut self, interp: &mut Interpreter) -> Result<Value, String> {
-        let target_depth = self.frames.len() - 1;
+        let _target_depth = self.frames.len() - 1;
         self.run(interp)?;
         // The return value should be on the stack
         Ok(self.stack.pop().unwrap_or(Value::void()))
@@ -265,28 +265,42 @@ impl VM {
                     let argc = read_u8!();
 
                     // JIT: check if this function is hot and JIT'd
-                    if let Some(ref mut jit) = self.jit {
-                        if let Some(ptr) = jit.check_and_compile(target_chunk, &self.chunks) {
+                    {
+                        let jit_ptr = if let Some(ref mut jit) = self.jit {
+                            jit.check_and_compile(target_chunk, &self.chunks)
+                        } else {
+                            None
+                        };
+                        if let Some(ptr) = jit_ptr {
                             if argc >= 1 && argc <= 8 {
                                 let mut raw_args = Vec::with_capacity(argc as usize);
                                 let start = self.stack.len() - argc as usize;
                                 for i in 0..argc as usize {
                                     raw_args.push(self.stack[start + i].raw());
                                 }
-                                // Don't drop the values — the JIT now owns them
-                                // Actually we need to forget them since raw() doesn't consume
                                 for _ in 0..argc {
                                     let v = self.stack.pop().unwrap();
                                     std::mem::forget(v);
                                 }
-                                let result_raw = unsafe { jit.call_jit_fn(ptr, &raw_args) };
+                                let vm_ptr = self as *mut VM;
+                                let interp_ptr = interp as *mut Interpreter;
+                                let chunks_ptr = &self.chunks as *const Vec<Chunk>;
+                                crate::vm::jit::set_jit_context(vm_ptr, interp_ptr, chunks_ptr, target_chunk);
+                                let result_raw = unsafe { self.jit.as_ref().unwrap().call_jit_fn(ptr, &raw_args) };
                                 self.stack.push(Value::from_raw(result_raw));
                                 continue;
                             }
                         }
                     }
 
-                    let new_base = self.stack.len() - argc as usize;
+                    // Pad missing optional params with Void
+                    let expected = self.chunks[target_chunk].param_count as usize;
+                    let actual = argc as usize;
+                    for _ in actual..expected {
+                        self.stack.push(Value::void());
+                    }
+
+                    let new_base = self.stack.len() - expected;
                     self.frames.push(CallFrame {
                         chunk_idx: target_chunk,
                         ip: 0,
@@ -607,6 +621,21 @@ impl VM {
                         self.globals.resize(idx + 1, Value::void());
                     }
                     let val = self.stack.pop().ok_or("VM: stack underflow")?;
+                    // Type check: prevent reassigning to incompatible type
+                    let existing = &self.globals[idx];
+                    if !existing.is_void() && existing.type_name() != val.type_name()
+                        && existing.type_name() != "void" && val.type_name() != "void"
+                    {
+                        let name = if idx < self.global_names.len() {
+                            self.global_names[idx].to_string()
+                        } else {
+                            format!("#{idx}")
+                        };
+                        return Err(format!(
+                            "Type mismatch: variable '{}' is {}, cannot assign {} (use 'free {}' first)",
+                            name, existing.type_name(), val.type_name(), name
+                        ));
+                    }
                     self.globals[idx] = val;
                 }
 
@@ -857,7 +886,7 @@ impl VM {
                         self.last_error = Some(msg);
                         // Unwind frames back to the try-point's frame
                         while self.frames.len() > tp.frame_idx + 1 {
-                            let old_base = self.frames.last().unwrap().base;
+                            let _old_base = self.frames.last().unwrap().base;
                             self.frames.pop();
                         }
                         frame_idx = tp.frame_idx;
@@ -1188,7 +1217,7 @@ impl VM {
                         frame_idx,
                         error_ip,
                         stack_depth: self.stack.len(),
-                        error_msg: None,
+                        _error_msg: None,
                     });
                 }
                 Op::TryEnd => {
@@ -1243,6 +1272,15 @@ impl VM {
     pub(crate) fn set_global(&mut self, idx: usize, val: Value) {
         if idx >= self.globals.len() {
             self.globals.resize(idx + 1, Value::void());
+        }
+        // Type check (same as Op::SetGlobal inline)
+        let existing = &self.globals[idx];
+        if !existing.is_void() && existing.type_name() != val.type_name()
+            && existing.type_name() != "void" && val.type_name() != "void"
+        {
+            // Silently reject — JIT callers can't propagate errors easily
+            // The type system should catch this at compile time in the future
+            return;
         }
         self.globals[idx] = val;
     }
