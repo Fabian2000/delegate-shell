@@ -24,6 +24,12 @@ pub struct Interpreter {
     allow_exec: bool,
     /// When true, standard builtins are available. When false, only user-registered functions work.
     allow_builtins: bool,
+    /// When true, network builtins (http_get, http_post, etc.) are available.
+    allow_network: bool,
+    /// Current call depth for recursion limit
+    call_depth: usize,
+    /// Maximum allowed call depth
+    max_call_depth: usize,
 }
 
 /// Return control flow signal
@@ -46,6 +52,9 @@ impl Interpreter {
             has_executed: false,
             allow_exec: true,
             allow_builtins: true,
+            allow_network: true,
+            call_depth: 0,
+            max_call_depth: 10000,
         })
     }
 
@@ -61,6 +70,26 @@ impl Interpreter {
         if !allow {
             self.registry = crate::builtins::registry::BuiltinRegistry::empty();
         }
+    }
+
+    /// Disable network builtins (http_get, http_post, download, etc.).
+    pub fn set_allow_network(&mut self, allow: bool) {
+        self.allow_network = allow;
+    }
+
+    /// Whether external exec is allowed.
+    pub fn allow_exec(&self) -> bool {
+        self.allow_exec
+    }
+
+    /// Whether builtins are allowed.
+    pub fn allow_builtins(&self) -> bool {
+        self.allow_builtins
+    }
+
+    /// Whether network access is allowed.
+    pub fn allow_network(&self) -> bool {
+        self.allow_network
     }
 
     /// Set the execution mode. Must be called before any code is executed.
@@ -239,7 +268,14 @@ impl Interpreter {
             }
 
             StmtKind::Import(path) => {
-                let content = std::fs::read_to_string(path)
+                let cwd = std::env::current_dir()
+                    .map_err(|e| format!("import: {e}"))?;
+                let full_path = cwd.join(path).canonicalize()
+                    .map_err(|e| format!("Cannot import '{path}': {e}"))?;
+                if !full_path.starts_with(&cwd) {
+                    return Err(format!("import: path '{}' is outside the current directory", path));
+                }
+                let content = std::fs::read_to_string(&full_path)
                     .map_err(|e| format!("Cannot import '{path}': {e}"))?;
                 let mut lexer = crate::lexer::Lexer::new(&content);
                 let tokens = lexer.tokenize();
@@ -274,6 +310,9 @@ impl Interpreter {
             }
 
             StmtKind::Alias { name, target } => {
+                if !self.allow_exec {
+                    return Err("alias is disabled when exec is not allowed".to_string());
+                }
                 self.env.aliases.insert(name.to_ascii_lowercase(), target.clone());
                 Ok(FlowSignal::None)
             }
@@ -531,6 +570,9 @@ impl Interpreter {
     }
 
     fn exec_use(&mut self, path: &str, alias: Option<&str>) -> Result<FlowSignal, String> {
+        if !self.allow_exec {
+            return Err("use is disabled when exec is not allowed".to_string());
+        }
         let p = std::path::Path::new(path);
         if p.is_file() {
             let name = alias.unwrap_or_else(||
@@ -991,8 +1033,10 @@ impl Interpreter {
         if let Some(result) = self.call_user_fn(lower, args.clone()) {
             return result;
         }
-        if let Some(result) = self.call_builtin(lower, &args) {
-            return result;
+        if self.allow_builtins {
+            if let Some(result) = self.call_builtin(lower, &args) {
+                return result;
+            }
         }
         Err(format!("Undefined function: '{name}'"))
     }
@@ -1070,6 +1114,10 @@ impl Interpreter {
     fn call_user_fn(&mut self, name: &str, args: Vec<Value>) -> Option<Result<Value, String>> {
         let func = self.env.get_fn(name)?.clone();
 
+        if self.call_depth >= self.max_call_depth {
+            return Some(Err(format!("maximum recursion depth exceeded (limit: {})", self.max_call_depth)));
+        }
+
         let required_count = func.params.len();
         let optional_count = func.optional_params.len();
         let total_count = required_count + optional_count;
@@ -1140,6 +1188,7 @@ impl Interpreter {
             self.env.set_local(opt_param, MaybeError::Ok(val));
         }
 
+        self.call_depth += 1;
         let mut return_val = Value::void();
         for stmt in &func.body {
             match self.exec_stmt(stmt) {
@@ -1150,11 +1199,13 @@ impl Interpreter {
                 Ok(FlowSignal::Return(None)) => break,
                 Ok(FlowSignal::None | FlowSignal::Continue | FlowSignal::Break) => {}
                 Err(e) => {
+                    self.call_depth -= 1;
                     self.env.pop_scope();
                     return Some(Err(e));
                 }
             }
         }
+        self.call_depth -= 1;
 
         self.env.pop_scope();
 

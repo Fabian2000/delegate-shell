@@ -1,10 +1,21 @@
 use indexmap::IndexMap;
 use crate::interpreter::value::{Value, new_object};
+use crate::interpreter::Interpreter;
 use std::io::Read;
 use super::registry::{BuiltinRegistry, Param, Type};
 
-fn http_get(args: &[Value]) -> Result<Value, String> {
-    let Some(url) = args[0].as_str_ref() else { unreachable!() };
+fn check_network(interp: &Interpreter, fn_name: &str) -> Result<(), String> {
+    if !interp.allow_network() {
+        return Err(format!("{fn_name}() is disabled when network access is not allowed"));
+    }
+    Ok(())
+}
+
+fn http_get(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+    check_network(interp, "http_get")?;
+    let Some(url) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let agent = ureq::Agent::new_with_defaults();
     let mut req = agent.get(url);
     if args.len() == 2
@@ -18,9 +29,14 @@ fn http_get(args: &[Value]) -> Result<Value, String> {
     Ok(body_response(resp))
 }
 
-fn http_post(args: &[Value]) -> Result<Value, String> {
-    let Some(url) = args[0].as_str_ref() else { unreachable!() };
-    let Some(body) = args[1].as_str_ref() else { unreachable!() };
+fn http_post(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+    check_network(interp, "http_post")?;
+    let Some(url) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
+    let Some(body) = args[1].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[1].type_name()));
+    };
     let agent = ureq::Agent::new_with_defaults();
     let mut req = agent.post(url).header("Content-Type", "application/json");
     if args.len() == 3
@@ -34,9 +50,14 @@ fn http_post(args: &[Value]) -> Result<Value, String> {
     Ok(body_response(resp))
 }
 
-fn http_put(args: &[Value]) -> Result<Value, String> {
-    let Some(url) = args[0].as_str_ref() else { unreachable!() };
-    let Some(body) = args[1].as_str_ref() else { unreachable!() };
+fn http_put(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+    check_network(interp, "http_put")?;
+    let Some(url) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
+    let Some(body) = args[1].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[1].type_name()));
+    };
     let agent = ureq::Agent::new_with_defaults();
     let mut req = agent.put(url).header("Content-Type", "application/json");
     if args.len() == 3
@@ -50,8 +71,11 @@ fn http_put(args: &[Value]) -> Result<Value, String> {
     Ok(body_response(resp))
 }
 
-fn http_delete(args: &[Value]) -> Result<Value, String> {
-    let Some(url) = args[0].as_str_ref() else { unreachable!() };
+fn http_delete(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+    check_network(interp, "http_delete")?;
+    let Some(url) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let agent = ureq::Agent::new_with_defaults();
     let mut req = agent.delete(url);
     if args.len() == 2
@@ -65,9 +89,14 @@ fn http_delete(args: &[Value]) -> Result<Value, String> {
     Ok(body_response(resp))
 }
 
-fn download(args: &[Value]) -> Result<Value, String> {
-    let Some(url) = args[0].as_str_ref() else { unreachable!() };
-    let Some(path) = args[1].as_str_ref() else { unreachable!() };
+fn download(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+    check_network(interp, "download")?;
+    let Some(url) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
+    let Some(path) = args[1].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[1].type_name()));
+    };
     let resp = ureq::Agent::new_with_defaults()
         .get(url)
         .call()
@@ -80,7 +109,8 @@ fn download(args: &[Value]) -> Result<Value, String> {
     Ok(Value::void())
 }
 
-fn ip(args: &[Value]) -> Result<Value, String> {
+fn ip(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+    check_network(interp, "ip")?;
     let _ = args;
     let socket = std::net::UdpSocket::bind("0.0.0.0:0")
         .map_err(|e| format!("ip(): {e}"))?;
@@ -108,17 +138,17 @@ fn extract_headers(val: &Value) -> Option<IndexMap<String, Value>> {
 }
 
 pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
-    reg.add("http_get", &[Param::Required(Type::String), Param::Optional(Type::Object)], Type::Object, http_get)?;
-    reg.add("http_post", &[Param::Required(Type::String), Param::Required(Type::String), Param::Optional(Type::Object)], Type::Object, http_post)?;
-    reg.add("http_put", &[Param::Required(Type::String), Param::Required(Type::String), Param::Optional(Type::Object)], Type::Object, http_put)?;
-    reg.add("http_delete", &[Param::Required(Type::String), Param::Optional(Type::Object)], Type::Object, http_delete)?;
-    reg.add("download", &[Param::Required(Type::String), Param::Required(Type::String)], Type::Void, download)?;
+    reg.add_interp("http_get", &[Param::Required(Type::String), Param::Optional(Type::Object)], Type::Object, http_get)?;
+    reg.add_interp("http_post", &[Param::Required(Type::String), Param::Required(Type::String), Param::Optional(Type::Object)], Type::Object, http_post)?;
+    reg.add_interp("http_put", &[Param::Required(Type::String), Param::Required(Type::String), Param::Optional(Type::Object)], Type::Object, http_put)?;
+    reg.add_interp("http_delete", &[Param::Required(Type::String), Param::Optional(Type::Object)], Type::Object, http_delete)?;
+    reg.add_interp("download", &[Param::Required(Type::String), Param::Required(Type::String)], Type::Void, download)?;
     reg.add("hostname", &[], Type::String, |_args| {
         let name = hostname::get()
             .map_or_else(|_| "unknown".to_string(), |n| n.to_string_lossy().to_string());
         Ok(Value::string_from(&name))
     })?;
-    reg.add("ip", &[], Type::String, ip)?;
+    reg.add_interp("ip", &[], Type::String, ip)?;
 
     Ok(())
 }

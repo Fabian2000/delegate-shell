@@ -6,8 +6,8 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     reg.add("get_processes", &[], Type::List, builtin_get_processes)?;
     reg.add("get_process_by_name", &[Param::Required(Type::String)], Type::List, builtin_get_process_by_name)?;
     reg.add("get_process_by_id", &[Param::Required(Type::Int)], Type::Dyn, builtin_get_process_by_id)?;
-    reg.add("kill_process", &[Param::Required(Type::Dyn)], Type::Bool, builtin_kill_process)?;
-    reg.add("is_process_running", &[Param::Required(Type::Dyn)], Type::Bool, builtin_is_process_running)?;
+    reg.add("kill_process", &[Param::Required(Type::Object)], Type::Bool, builtin_kill_process)?;
+    reg.add("is_process_running", &[Param::Required(Type::Object)], Type::Bool, builtin_is_process_running)?;
 
     Ok(())
 }
@@ -59,11 +59,15 @@ fn builtin_get_processes(_args: &[Value]) -> Result<Value, String> {
 }
 
 fn builtin_get_process_by_name(args: &[Value]) -> Result<Value, String> {
-    let Some(search) = args[0].as_str_ref() else { unreachable!() };
+    let Some(search) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let search = search.to_ascii_lowercase();
 
     let all = builtin_get_processes(&[])?;
-    let Some(list) = all.as_list_ref() else { unreachable!() };
+    let Some(list) = all.as_list_ref() else {
+        return Err("internal: get_processes did not return a list".to_string());
+    };
     let list = list.borrow();
     let mut results = Vec::new();
     for proc in list.iter() {
@@ -82,7 +86,9 @@ fn builtin_get_process_by_name(args: &[Value]) -> Result<Value, String> {
 }
 
 fn builtin_get_process_by_id(args: &[Value]) -> Result<Value, String> {
-    let Some(pid) = args[0].as_int() else { unreachable!() };
+    let Some(pid) = args[0].as_int() else {
+        return Err(format!("expected int, got {}", args[0].type_name()));
+    };
 
     #[cfg(unix)]
     {
@@ -149,9 +155,6 @@ fn builtin_is_process_running(args: &[Value]) -> Result<Value, String> {
 // --- Helpers ---
 
 fn extract_pid(val: &Value) -> Result<i64, String> {
-    if let Some(n) = val.as_int() {
-        return Ok(n);
-    }
     if let Some(rc) = val.as_object_ref() {
         if let Some(id_val) = rc.borrow().fields.get("id").cloned() {
             if let Some(pid) = id_val.as_int() {
@@ -160,7 +163,7 @@ fn extract_pid(val: &Value) -> Result<i64, String> {
         }
         return Err("Process object has no 'id' field".to_string());
     }
-    Err(format!("Expected process object or int, got {}", val.type_name()))
+    Err(format!("Expected process object with 'id' field, got {}", val.type_name()))
 }
 
 #[cfg(unix)]

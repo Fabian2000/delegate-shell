@@ -6,7 +6,9 @@ use super::registry::{BuiltinRegistry, Param, Type};
 
 pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     reg.add("env", &[Param::Required(Type::String)], Type::String, |args| {
-        let Some(key) = args[0].as_str_ref() else { unreachable!() };
+        let Some(key) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         std::env::var(key).map(|s| Value::string_from(&s))
             .map_err(|_| format!("Environment variable '{key}' not set"))
     })?;
@@ -32,17 +34,11 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
                 std::thread::sleep(std::time::Duration::from_secs_f64(s));
                 Ok(Value::void())
             }
-            _ => unreachable!(),
+            _ => Err(format!("expected number, got {}", args[0].type_name())),
         }
     })?;
 
-    reg.add("env_set", &[Param::Required(Type::String), Param::Required(Type::String)], Type::Void, |args| {
-        let Some(key) = args[0].as_str_ref() else { unreachable!() };
-        let Some(val) = args[1].as_str_ref() else { unreachable!() };
-        // SAFETY: We are single-threaded at this point in the interpreter
-        unsafe { std::env::set_var(key, val); }
-        Ok(Value::void())
-    })?;
+    reg.add_interp("env_set", &[Param::Required(Type::String), Param::Required(Type::String)], Type::Void, builtin_env_set)?;
 
     reg.add("env_all", &[], Type::Object, |_args| {
         let mut map = IndexMap::new();
@@ -71,8 +67,8 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
 
     reg.add("input", &[Param::Required(Type::String)], Type::String, builtin_input)?;
 
-    reg.add("exec", &[Param::Required(Type::String), Param::Required(Type::List)], Type::Dyn, builtin_exec)?;
-    reg.add("exec_in", &[Param::Required(Type::String), Param::Required(Type::List), Param::Required(Type::Dyn)], Type::Dyn, builtin_exec_in)?;
+    reg.add_interp("exec", &[Param::Required(Type::String), Param::Required(Type::List)], Type::Dyn, builtin_exec)?;
+    reg.add_interp("exec_in", &[Param::Required(Type::String), Param::Required(Type::List), Param::Required(Type::Dyn)], Type::Dyn, builtin_exec_in)?;
 
     reg.add("home", &[], Type::String, |_args| {
         #[cfg(unix)]
@@ -101,13 +97,15 @@ fn builtin_exit(args: &[Value]) -> Result<Value, String> {
     } else if let Some(n) = args[0].as_int() {
         i32::try_from(n).unwrap_or(1)
     } else {
-        unreachable!()
+        return Err(format!("expected int, got {}", args[0].type_name()));
     };
-    std::process::exit(code);
+    Err(format!("\x00EXIT\x00{}", code))
 }
 
 fn builtin_which(args: &[Value]) -> Result<Value, String> {
-    let Some(name) = args[0].as_str_ref() else { unreachable!() };
+    let Some(name) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let path_var = std::env::var("PATH").unwrap_or_default();
     let sep = if cfg!(windows) { ';' } else { ':' };
     for dir in path_var.split(sep) {
@@ -128,7 +126,9 @@ fn builtin_which(args: &[Value]) -> Result<Value, String> {
 }
 
 fn builtin_input(args: &[Value]) -> Result<Value, String> {
-    let Some(prompt) = args[0].as_str_ref() else { unreachable!() };
+    let Some(prompt) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     eprint!("{prompt}");
     let _ = std::io::stderr().flush();
     let mut buf = String::new();
@@ -142,9 +142,31 @@ fn builtin_input(args: &[Value]) -> Result<Value, String> {
     Ok(Value::string_from(&buf))
 }
 
-fn builtin_exec(args: &[Value]) -> Result<Value, String> {
-    let Some(path) = args[0].as_str_ref() else { unreachable!() };
-    let Some(list) = args[1].as_list_ref() else { unreachable!() };
+fn builtin_env_set(args: &[Value], interp: &mut crate::interpreter::Interpreter) -> Result<Value, String> {
+    if !interp.allow_exec() {
+        return Err("env_set() is disabled in sandbox mode".to_string());
+    }
+    let Some(key) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
+    let Some(val) = args[1].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[1].type_name()));
+    };
+    // SAFETY: We are single-threaded at this point in the interpreter
+    unsafe { std::env::set_var(key, val); }
+    Ok(Value::void())
+}
+
+fn builtin_exec(args: &[Value], interp: &mut crate::interpreter::Interpreter) -> Result<Value, String> {
+    if !interp.allow_exec() {
+        return Err("exec() is disabled in sandbox mode".to_string());
+    }
+    let Some(path) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
+    let Some(list) = args[1].as_list_ref() else {
+        return Err(format!("expected list, got {}", args[1].type_name()));
+    };
     let str_args: Vec<String> = list.borrow().iter().map(ToString::to_string).collect();
 
     let output = Command::new(path)
@@ -163,9 +185,16 @@ fn builtin_exec(args: &[Value]) -> Result<Value, String> {
     }))
 }
 
-fn builtin_exec_in(args: &[Value]) -> Result<Value, String> {
-    let Some(path) = args[0].as_str_ref() else { unreachable!() };
-    let Some(list) = args[1].as_list_ref() else { unreachable!() };
+fn builtin_exec_in(args: &[Value], interp: &mut crate::interpreter::Interpreter) -> Result<Value, String> {
+    if !interp.allow_exec() {
+        return Err("exec_in() is disabled in sandbox mode".to_string());
+    }
+    let Some(path) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
+    let Some(list) = args[1].as_list_ref() else {
+        return Err(format!("expected list, got {}", args[1].type_name()));
+    };
     let str_args: Vec<String> = list.borrow().iter().map(ToString::to_string).collect();
 
     let stdin_data = if let Some(s) = args[2].as_str_ref() {
@@ -173,7 +202,7 @@ fn builtin_exec_in(args: &[Value]) -> Result<Value, String> {
     } else if let Some(b) = args[2].as_bytes_ref() {
         String::from_utf8_lossy(b).to_string()
     } else {
-        unreachable!()
+        return Err(format!("expected string or bytes, got {}", args[2].type_name()));
     };
 
     let mut child = Command::new(path)

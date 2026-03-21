@@ -54,7 +54,9 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
 }
 
 fn builtin_set_color(args: &[Value]) -> Result<Value, String> {
-    let Some(name) = args[0].as_str_ref() else { unreachable!() };
+    let Some(name) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let code = color_code(name, false)?;
     print!("{ESC}{code}m");
     let _ = std::io::stdout().flush();
@@ -62,7 +64,9 @@ fn builtin_set_color(args: &[Value]) -> Result<Value, String> {
 }
 
 fn builtin_set_bg(args: &[Value]) -> Result<Value, String> {
-    let Some(name) = args[0].as_str_ref() else { unreachable!() };
+    let Some(name) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let code = color_code(name, true)?;
     print!("{ESC}{code}m");
     let _ = std::io::stdout().flush();
@@ -100,8 +104,12 @@ fn builtin_set_underline(args: &[Value]) -> Result<Value, String> {
 }
 
 fn builtin_cursor_pos(args: &[Value]) -> Result<Value, String> {
-    let Some(row) = args[0].as_int() else { unreachable!() };
-    let Some(col) = args[1].as_int() else { unreachable!() };
+    let Some(row) = args[0].as_int() else {
+        return Err(format!("expected int, got {}", args[0].type_name()));
+    };
+    let Some(col) = args[1].as_int() else {
+        return Err(format!("expected int, got {}", args[1].type_name()));
+    };
     print!("{ESC}{row};{col}H");
     let _ = std::io::stdout().flush();
     Ok(Value::void())

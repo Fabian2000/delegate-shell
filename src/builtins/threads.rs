@@ -24,11 +24,21 @@ fn builtin_thread(args: &[Value], interp: &mut Interpreter) -> Result<Value, Str
     // Clone user functions so the thread has its own copy
     let user_fns = interp.env.clone_fns();
 
+    // Inherit sandbox flags from parent interpreter
+    let parent_allow_exec = interp.allow_exec();
+    let parent_allow_builtins = interp.allow_builtins();
+    let parent_allow_network = interp.allow_network();
+
     let (fn_name, res_code, sendable_args) = lambda;
 
     let handle = thread::spawn(move || {
         let mut thread_interp = Interpreter::new()
             .map_err(|e| format!("thread init failed: {e}"))?;
+        thread_interp.set_allow_exec(parent_allow_exec);
+        if !parent_allow_builtins {
+            thread_interp.set_allow_builtins(false);
+        }
+        thread_interp.set_allow_network(parent_allow_network);
         thread_interp.env.restore_fns(user_fns);
 
         let call_args: Vec<Value> = sendable_args.into_iter().map(Value::from_sendable).collect();

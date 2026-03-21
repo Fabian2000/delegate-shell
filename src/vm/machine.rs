@@ -39,8 +39,9 @@ pub struct VM {
     fn_table: std::collections::HashMap<String, usize>,
     send_stack: Vec<Option<Value>>,
     try_stack: Vec<TryPoint>,
-    last_error: Option<String>,
+    pub(crate) last_error: Option<String>,
     jit: Option<super::jit::JitManager>,
+    pub(crate) call_depth: usize,
 }
 
 impl VM {
@@ -59,6 +60,7 @@ impl VM {
             try_stack: Vec::new(),
             last_error: None,
             jit: None,
+            call_depth: 0,
         }
     }
 
@@ -264,6 +266,11 @@ impl VM {
                     let target_chunk = read_u16!() as usize;
                     let argc = read_u8!();
 
+                    self.call_depth += 1;
+                    if self.call_depth > 10000 {
+                        return Err("maximum recursion depth exceeded (limit: 10000)".to_string());
+                    }
+
                     // JIT: check if this function is hot and JIT'd
                     {
                         let jit_ptr = if let Some(ref mut jit) = self.jit {
@@ -279,14 +286,29 @@ impl VM {
                                     raw_args.push(self.stack[start + i].raw());
                                 }
                                 for _ in 0..argc {
-                                    let v = self.stack.pop().unwrap();
+                                    let v = self.stack.pop().ok_or("VM: stack underflow")?;
                                     std::mem::forget(v);
                                 }
                                 let vm_ptr = self as *mut VM;
                                 let interp_ptr = interp as *mut Interpreter;
                                 let chunks_ptr = &self.chunks as *const Vec<Chunk>;
                                 crate::vm::jit::set_jit_context(vm_ptr, interp_ptr, chunks_ptr, target_chunk);
-                                let result_raw = unsafe { self.jit.as_ref().unwrap().call_jit_fn(ptr, &raw_args) };
+                                let result_raw = unsafe { self.jit.as_ref().ok_or("VM: JIT not initialized")?.call_jit_fn(ptr, &raw_args, self.call_depth as u64) };
+                                self.call_depth -= 1;
+                                if let Some(err_msg) = self.last_error.take() {
+                                    // Same error handling as Op::Throw
+                                    if let Some(tp) = self.try_stack.pop() {
+                                        self.last_error = Some(err_msg);
+                                        while self.frames.len() > tp.frame_idx + 1 {
+                                            self.frames.pop();
+                                        }
+                                        frame_idx = tp.frame_idx;
+                                        self.stack.truncate(tp.stack_depth);
+                                        self.frames[frame_idx].ip = tp.error_ip;
+                                        continue;
+                                    }
+                                    return Err(err_msg);
+                                }
                                 self.stack.push(Value::from_raw(result_raw));
                                 continue;
                             }
@@ -312,6 +334,7 @@ impl VM {
                     let val = self.stack.pop().ok_or("VM: stack underflow on return")?;
                     let old_base = base!();
                     self.frames.pop();
+                    if self.call_depth > 0 { self.call_depth -= 1; }
                     frame_idx -= 1;
                     self.stack.truncate(old_base);
                     if self.frames.is_empty() {
@@ -322,6 +345,7 @@ impl VM {
                 Op::ReturnVoid => {
                     let old_base = base!();
                     self.frames.pop();
+                    if self.call_depth > 0 { self.call_depth -= 1; }
                     if self.frames.is_empty() {
                         return Ok(());
                     }
@@ -344,12 +368,12 @@ impl VM {
                         }
                         // String fast path: take left operand to get sole ownership for in-place append
                         if self.stack[len-2].is_string() && self.stack[len-1].is_string() {
-                            let b = self.stack.pop().unwrap();
+                            let b = self.stack.pop().ok_or("VM: stack underflow")?;
                             // Take the left value out, replacing with void (refcount decrements by 0)
-                            let mut a = std::mem::replace(self.stack.last_mut().unwrap(), Value::void());
+                            let mut a = std::mem::replace(self.stack.last_mut().ok_or("VM: stack underflow")?, Value::void());
                             if let Some(b_str) = b.as_str_ref() {
                                 if a.try_string_append_in_place(b_str) {
-                                    *self.stack.last_mut().unwrap() = a;
+                                    *self.stack.last_mut().ok_or("VM: stack underflow")? = a;
                                     continue;
                                 }
                                 // Fallback: allocate with capacity
@@ -357,12 +381,12 @@ impl VM {
                                     let mut s = String::with_capacity(a_str.len() + b_str.len());
                                     s.push_str(a_str);
                                     s.push_str(b_str);
-                                    *self.stack.last_mut().unwrap() = Value::string_owned(s);
+                                    *self.stack.last_mut().ok_or("VM: stack underflow")? = Value::string_owned(s);
                                     continue;
                                 }
                             }
                             // Should not reach here, but just in case
-                            *self.stack.last_mut().unwrap() = generic_add(a, b)?;
+                            *self.stack.last_mut().ok_or("VM: stack underflow")? = generic_add(a, b)?;
                             continue;
                         }
                     }
@@ -886,7 +910,7 @@ impl VM {
                         self.last_error = Some(msg);
                         // Unwind frames back to the try-point's frame
                         while self.frames.len() > tp.frame_idx + 1 {
-                            let _old_base = self.frames.last().unwrap().base;
+                            let _old_base = self.frames.last().ok_or("VM: no call frame")?.base;
                             self.frames.pop();
                         }
                         frame_idx = tp.frame_idx;
@@ -1055,10 +1079,10 @@ impl VM {
                     self.error_vars.remove(&slot);
                 }
                 Op::RecordError => {
-                    // Store last_error into error_vars for the named variable
+                    // Store last_error into error_vars for the named variable, then clear it
                     let slot = read_u16!();
-                    if let Some(ref err) = self.last_error {
-                        self.error_vars.insert(slot, err.clone());
+                    if let Some(err) = self.last_error.take() {
+                        self.error_vars.insert(slot, err);
                     }
                     self.ok_vars.remove(&slot);
                 }

@@ -56,6 +56,10 @@ fn main() {
     }
     engine.cancel_flag = Some(&CANCELLED);
     if let Err(e) = engine.run_source(&source) {
+        if let Some(code_str) = e.strip_prefix("\x00EXIT\x00") {
+            let code: i32 = code_str.parse().unwrap_or(1);
+            std::process::exit(code);
+        }
         eprintln!("Runtime error: {e}");
         std::process::exit(1);
     }
@@ -166,6 +170,10 @@ fn run_repl() {
         }
 
         if let Err(e) = interp.run_source(&source) {
+            if let Some(code_str) = e.strip_prefix("\x00EXIT\x00") {
+                let code: i32 = code_str.parse().unwrap_or(1);
+                std::process::exit(code);
+            }
             eprintln!("Error: {e}");
         }
     }

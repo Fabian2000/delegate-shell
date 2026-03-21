@@ -354,7 +354,7 @@ impl<'a> ExprParser<'a> {
             Token::Bang => UnaryOp::Not,
             Token::BitNot => UnaryOp::BitNot,
             Token::Minus => UnaryOp::Neg,
-            _ => unreachable!(),
+            _ => return Err("internal: unexpected state".to_string()),
         };
         Ok(Expr {
             span: Span { start: span.start, end: expr.span.end },

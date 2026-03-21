@@ -17,8 +17,12 @@ fn now(_args: &[Value]) -> Result<Value, String> {
 }
 
 fn date_format(args: &[Value]) -> Result<Value, String> {
-    let Some(ts) = args[0].as_int() else { unreachable!() };
-    let Some(pattern) = args[1].as_str_ref() else { unreachable!() };
+    let Some(ts) = args[0].as_int() else {
+        return Err(format!("expected int, got {}", args[0].type_name()));
+    };
+    let Some(pattern) = args[1].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[1].type_name()));
+    };
     let dt = Local.timestamp_opt(ts, 0)
         .single()
         .ok_or_else(|| format!("Invalid timestamp: {ts}"))?;
@@ -26,8 +30,12 @@ fn date_format(args: &[Value]) -> Result<Value, String> {
 }
 
 fn date_parse(args: &[Value]) -> Result<Value, String> {
-    let Some(s) = args[0].as_str_ref() else { unreachable!() };
-    let Some(pattern) = args[1].as_str_ref() else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
+    let Some(pattern) = args[1].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[1].type_name()));
+    };
     let naive = NaiveDateTime::parse_from_str(s, pattern)
         .map_err(|e| format!("date_parse('{s}', '{pattern}'): {e}"))?;
     let local = Local.from_local_datetime(&naive)
@@ -44,8 +52,12 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     reg.add("date_format", &[Param::Required(Type::Int), Param::Required(Type::String)], Type::String, date_format)?;
     reg.add("date_parse", &[Param::Required(Type::String), Param::Required(Type::String)], Type::Int, date_parse)?;
     reg.add("elapsed", &[Param::Required(Type::Int), Param::Required(Type::Int)], Type::Int, |args| {
-        let Some(start) = args[0].as_int() else { unreachable!() };
-        let Some(end) = args[1].as_int() else { unreachable!() };
+        let Some(start) = args[0].as_int() else {
+            return Err(format!("expected int, got {}", args[0].type_name()));
+        };
+        let Some(end) = args[1].as_int() else {
+            return Err(format!("expected int, got {}", args[1].type_name()));
+        };
         Ok(Value::int(end - start))
     })?;
 

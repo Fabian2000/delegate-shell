@@ -5,8 +5,12 @@ use crate::interpreter::value::{Value, FileHandleInner};
 use super::registry::{BuiltinRegistry, Param, Type};
 
 fn builtin_read_chunk(args: &[Value]) -> Result<Value, String> {
-    let Some(fh) = args[0].as_file_handle() else { unreachable!() };
-    let Some(n) = args[1].as_int() else { unreachable!() };
+    let Some(fh) = args[0].as_file_handle() else {
+        return Err(format!("expected file_handle, got {}", args[0].type_name()));
+    };
+    let Some(n) = args[1].as_int() else {
+        return Err(format!("expected int, got {}", args[1].type_name()));
+    };
     if n <= 0 {
         return Err("read_chunk: size must be positive".to_string());
     }
@@ -25,8 +29,12 @@ fn builtin_read_chunk(args: &[Value]) -> Result<Value, String> {
 }
 
 fn builtin_byte_at(args: &[Value]) -> Result<Value, String> {
-    let Some(b) = args[0].as_bytes_ref() else { unreachable!() };
-    let Some(idx) = args[1].as_int() else { unreachable!() };
+    let Some(b) = args[0].as_bytes_ref() else {
+        return Err(format!("expected bytes, got {}", args[0].type_name()));
+    };
+    let Some(idx) = args[1].as_int() else {
+        return Err(format!("expected int, got {}", args[1].type_name()));
+    };
     let ui = usize::try_from(idx)
         .map_err(|_| format!("byte_at: index {idx} out of bounds (len {})", b.len()))?;
     if ui >= b.len() {
@@ -36,9 +44,15 @@ fn builtin_byte_at(args: &[Value]) -> Result<Value, String> {
 }
 
 fn builtin_byte_slice(args: &[Value]) -> Result<Value, String> {
-    let Some(b) = args[0].as_bytes_ref() else { unreachable!() };
-    let Some(s) = args[1].as_int() else { unreachable!() };
-    let Some(e) = args[2].as_int() else { unreachable!() };
+    let Some(b) = args[0].as_bytes_ref() else {
+        return Err(format!("expected bytes, got {}", args[0].type_name()));
+    };
+    let Some(s) = args[1].as_int() else {
+        return Err(format!("expected int, got {}", args[1].type_name()));
+    };
+    let Some(e) = args[2].as_int() else {
+        return Err(format!("expected int, got {}", args[2].type_name()));
+    };
     let start = usize::try_from(s).unwrap_or(0);
     let end = usize::try_from(e).unwrap_or(0);
     if start > b.len() || end > b.len() || start > end {
@@ -48,7 +62,9 @@ fn builtin_byte_slice(args: &[Value]) -> Result<Value, String> {
 }
 
 fn builtin_bytes_from_list(args: &[Value]) -> Result<Value, String> {
-    let Some(list) = args[0].as_list_ref() else { unreachable!() };
+    let Some(list) = args[0].as_list_ref() else {
+        return Err(format!("expected list, got {}", args[0].type_name()));
+    };
     let list = list.borrow();
     let mut bytes = Vec::with_capacity(list.len());
     for item in list.iter() {
@@ -65,7 +81,9 @@ fn builtin_bytes_from_list(args: &[Value]) -> Result<Value, String> {
 
 pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     reg.add("open_file", &[Param::Required(Type::String)], Type::FileHandle, |args| {
-        let Some(path) = args[0].as_str_ref() else { unreachable!() };
+        let Some(path) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         let file = fs::File::open(path)
             .map_err(|e| format!("open_file('{path}'): {e}"))?;
         let reader = BufReader::new(file);
@@ -73,7 +91,9 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     })?;
 
     reg.add("read_line", &[Param::Required(Type::FileHandle)], Type::String, |args| {
-        let Some(fh) = args[0].as_file_handle() else { unreachable!() };
+        let Some(fh) = args[0].as_file_handle() else {
+            return Err(format!("expected file_handle, got {}", args[0].type_name()));
+        };
         let mut line = String::new();
         let bytes_read = {
             let mut guard = fh.lock().map_err(|e| format!("read_line: {e}"))?;
@@ -96,12 +116,16 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     reg.add("read_chunk", &[Param::Required(Type::FileHandle), Param::Required(Type::Int)], Type::Bytes, builtin_read_chunk)?;
 
     reg.add("close_file", &[Param::Required(Type::FileHandle)], Type::Void, |args| {
-        let Some(_fh) = args[0].as_file_handle() else { unreachable!() };
+        let Some(_fh) = args[0].as_file_handle() else {
+            return Err(format!("expected file_handle, got {}", args[0].type_name()));
+        };
         Ok(Value::void())
     })?;
 
     reg.add("byte_len", &[Param::Required(Type::Bytes)], Type::Int, |args| {
-        let Some(b) = args[0].as_bytes_ref() else { unreachable!() };
+        let Some(b) = args[0].as_bytes_ref() else {
+            return Err(format!("expected bytes, got {}", args[0].type_name()));
+        };
         Ok(Value::int(i64::try_from(b.len()).unwrap_or(i64::MAX)))
     })?;
 
@@ -110,35 +134,49 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     reg.add("byte_slice", &[Param::Required(Type::Bytes), Param::Required(Type::Int), Param::Required(Type::Int)], Type::Bytes, builtin_byte_slice)?;
 
     reg.add("to_bytes", &[Param::Required(Type::String)], Type::Bytes, |args| {
-        let Some(s) = args[0].as_str_ref() else { unreachable!() };
+        let Some(s) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         Ok(Value::bytes(s.as_bytes().to_vec()))
     })?;
 
     reg.add("from_bytes", &[Param::Required(Type::Bytes)], Type::String, |args| {
-        let Some(b) = args[0].as_bytes_ref() else { unreachable!() };
+        let Some(b) = args[0].as_bytes_ref() else {
+            return Err(format!("expected bytes, got {}", args[0].type_name()));
+        };
         let s = String::from_utf8(b.clone())
             .map_err(|e| format!("from_bytes: invalid UTF-8: {e}"))?;
         Ok(Value::string_from(&s))
     })?;
 
     reg.add("read_bytes", &[Param::Required(Type::String)], Type::Bytes, |args| {
-        let Some(path) = args[0].as_str_ref() else { unreachable!() };
+        let Some(path) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         let data = fs::read(path)
             .map_err(|e| format!("read_bytes('{path}'): {e}"))?;
         Ok(Value::bytes(data))
     })?;
 
     reg.add("write_bytes", &[Param::Required(Type::String), Param::Required(Type::Bytes)], Type::Void, |args| {
-        let Some(path) = args[0].as_str_ref() else { unreachable!() };
-        let Some(b) = args[1].as_bytes_ref() else { unreachable!() };
+        let Some(path) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
+        let Some(b) = args[1].as_bytes_ref() else {
+            return Err(format!("expected bytes, got {}", args[1].type_name()));
+        };
         fs::write(path, b)
             .map_err(|e| format!("write_bytes('{path}'): {e}"))?;
         Ok(Value::void())
     })?;
 
     reg.add("append_bytes", &[Param::Required(Type::String), Param::Required(Type::Bytes)], Type::Void, |args| {
-        let Some(path) = args[0].as_str_ref() else { unreachable!() };
-        let Some(b) = args[1].as_bytes_ref() else { unreachable!() };
+        let Some(path) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
+        let Some(b) = args[1].as_bytes_ref() else {
+            return Err(format!("expected bytes, got {}", args[1].type_name()));
+        };
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)

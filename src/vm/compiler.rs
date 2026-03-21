@@ -574,7 +574,7 @@ impl Compiler {
             BinOp::Gt => if use_int { Op::GtInt } else { Op::Gt },
             BinOp::LtEq => if use_int { Op::LteInt } else { Op::Lte },
             BinOp::GtEq => if use_int { Op::GteInt } else { Op::Gte },
-            BinOp::And | BinOp::Or => unreachable!(),
+            BinOp::And | BinOp::Or => return Err("internal: unexpected state".to_string()),
             BinOp::BitAnd => Op::BitAnd,
             BinOp::BitOr => Op::BitOr,
             BinOp::BitXor => Op::BitXor,

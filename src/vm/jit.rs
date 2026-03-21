@@ -662,6 +662,16 @@ unsafe extern "C" fn jit_vm_call(
     unsafe {
         let vm = &mut *get_jit_vm();
         let interp = &mut *get_jit_interp();
+
+        vm.call_depth += 1;
+        if vm.call_depth > 10000 {
+            vm.call_depth -= 1;
+            let v = Value::void();
+            let raw = v.raw();
+            std::mem::forget(v);
+            return raw;
+        }
+
         let args = std::slice::from_raw_parts(args_ptr, argc as usize);
         let base = vm.stack.len();
         for &arg_bits in args {
@@ -675,19 +685,22 @@ unsafe extern "C" fn jit_vm_call(
             ip: 0,
             base,
         });
-        match vm.run_frame(interp) {
+        let result = match vm.run_frame(interp) {
             Ok(val) => {
                 let raw = val.raw();
                 std::mem::forget(val);
                 raw
             }
-            Err(_) => {
+            Err(msg) => {
+                vm.last_error = Some(msg);
                 let v = Value::void();
                 let raw = v.raw();
                 std::mem::forget(v);
                 raw
             }
-        }
+        };
+        vm.call_depth -= 1;
+        result
     }
 }
 
@@ -714,6 +727,11 @@ unsafe extern "C" fn jit_free_global(idx: u64) {
 }
 
 /// Throw (returns void; actual error handling is TODO)
+unsafe extern "C" fn jit_recursion_overflow() {
+    let vm = &mut *get_jit_vm();
+    vm.last_error = Some("maximum recursion depth exceeded (limit: 10000)".to_string());
+}
+
 unsafe extern "C" fn jit_throw(val: u64) -> u64 {
     {
         let v = Value::from_raw(val);
@@ -952,6 +970,7 @@ const H_VM_CALL: &str = "jit_vm_call";
 const H_DEFINE_FUNCTION: &str = "jit_define_function";
 const H_FREE_GLOBAL: &str = "jit_free_global";
 const H_THROW: &str = "jit_throw";
+const H_RECURSION_OVERFLOW: &str = "jit_recursion_overflow";
 const H_ERROR_CHECK: &str = "jit_error_check";
 const H_ERROR_FIELD: &str = "jit_error_field";
 const H_SET_ERROR_TOLERANT: &str = "jit_set_error_tolerant";
@@ -1023,6 +1042,7 @@ impl JitManager {
                 builder.symbol(H_DEFINE_FUNCTION, jit_define_function as *const u8);
                 builder.symbol(H_FREE_GLOBAL, jit_free_global as *const u8);
                 builder.symbol(H_THROW, jit_throw as *const u8);
+                builder.symbol(H_RECURSION_OVERFLOW, jit_recursion_overflow as *const u8);
                 builder.symbol(H_ERROR_CHECK, jit_error_check as *const u8);
                 builder.symbol(H_ERROR_FIELD, jit_error_field as *const u8);
                 builder.symbol(H_SET_ERROR_TOLERANT, jit_set_error_tolerant as *const u8);
@@ -1079,12 +1099,13 @@ impl JitManager {
             return None;
         }
 
-        // Build signature: just actual function params, all i64, return i64.
+        // Build signature: actual function params + depth counter, all i64, return i64.
         // Context (vm_ptr, interp_ptr, chunks_ptr, chunk_idx) is passed via thread-locals.
         let mut sig = module.make_signature();
         for _ in 0..chunk.param_count {
             sig.params.push(AbiParam::new(types::I64));
         }
+        sig.params.push(AbiParam::new(types::I64)); // depth counter (last param)
         sig.returns.push(AbiParam::new(types::I64));
 
         let func_name = format!("jit_{}", chunk_idx);
@@ -1114,41 +1135,41 @@ impl JitManager {
     }
 
     /// Call a JIT'd function. Context is set via thread-locals before calling.
-    /// `args` contains the actual function arguments (1..=8).
-    pub unsafe fn call_jit_fn(&self, ptr: *const u8, args: &[u64]) -> u64 {
+    /// `args` contains the actual function arguments (1..=8). Depth is appended automatically.
+    pub unsafe fn call_jit_fn(&self, ptr: *const u8, args: &[u64], depth: u64) -> u64 {
         unsafe {
             match args.len() {
                 1 => {
-                    let func: unsafe extern "C" fn(u64) -> u64 = std::mem::transmute(ptr);
-                    func(args[0])
+                    let func: unsafe extern "C" fn(u64,u64) -> u64 = std::mem::transmute(ptr);
+                    func(args[0], depth)
                 }
                 2 => {
-                    let func: unsafe extern "C" fn(u64,u64) -> u64 = std::mem::transmute(ptr);
-                    func(args[0],args[1])
+                    let func: unsafe extern "C" fn(u64,u64,u64) -> u64 = std::mem::transmute(ptr);
+                    func(args[0],args[1], depth)
                 }
                 3 => {
-                    let func: unsafe extern "C" fn(u64,u64,u64) -> u64 = std::mem::transmute(ptr);
-                    func(args[0],args[1],args[2])
+                    let func: unsafe extern "C" fn(u64,u64,u64,u64) -> u64 = std::mem::transmute(ptr);
+                    func(args[0],args[1],args[2], depth)
                 }
                 4 => {
-                    let func: unsafe extern "C" fn(u64,u64,u64,u64) -> u64 = std::mem::transmute(ptr);
-                    func(args[0],args[1],args[2],args[3])
+                    let func: unsafe extern "C" fn(u64,u64,u64,u64,u64) -> u64 = std::mem::transmute(ptr);
+                    func(args[0],args[1],args[2],args[3], depth)
                 }
                 5 => {
-                    let func: unsafe extern "C" fn(u64,u64,u64,u64,u64) -> u64 = std::mem::transmute(ptr);
-                    func(args[0],args[1],args[2],args[3],args[4])
+                    let func: unsafe extern "C" fn(u64,u64,u64,u64,u64,u64) -> u64 = std::mem::transmute(ptr);
+                    func(args[0],args[1],args[2],args[3],args[4], depth)
                 }
                 6 => {
-                    let func: unsafe extern "C" fn(u64,u64,u64,u64,u64,u64) -> u64 = std::mem::transmute(ptr);
-                    func(args[0],args[1],args[2],args[3],args[4],args[5])
+                    let func: unsafe extern "C" fn(u64,u64,u64,u64,u64,u64,u64) -> u64 = std::mem::transmute(ptr);
+                    func(args[0],args[1],args[2],args[3],args[4],args[5], depth)
                 }
                 7 => {
-                    let func: unsafe extern "C" fn(u64,u64,u64,u64,u64,u64,u64) -> u64 = std::mem::transmute(ptr);
-                    func(args[0],args[1],args[2],args[3],args[4],args[5],args[6])
+                    let func: unsafe extern "C" fn(u64,u64,u64,u64,u64,u64,u64,u64) -> u64 = std::mem::transmute(ptr);
+                    func(args[0],args[1],args[2],args[3],args[4],args[5],args[6], depth)
                 }
                 8 => {
-                    let func: unsafe extern "C" fn(u64,u64,u64,u64,u64,u64,u64,u64) -> u64 = std::mem::transmute(ptr);
-                    func(args[0],args[1],args[2],args[3],args[4],args[5],args[6],args[7])
+                    let func: unsafe extern "C" fn(u64,u64,u64,u64,u64,u64,u64,u64,u64) -> u64 = std::mem::transmute(ptr);
+                    func(args[0],args[1],args[2],args[3],args[4],args[5],args[6],args[7], depth)
                 }
                 _ => Value::void().raw(),
             }
@@ -1203,6 +1224,7 @@ struct HelperRefs {
     define_function: cranelift_codegen::ir::FuncRef, // (i64, i64) -> void
     free_global: cranelift_codegen::ir::FuncRef,   // (i64) -> void
     throw: cranelift_codegen::ir::FuncRef,         // (i64) -> i64
+    recursion_overflow: cranelift_codegen::ir::FuncRef, // () -> void
     error_check: cranelift_codegen::ir::FuncRef,   // (i64) -> i64
     error_field: cranelift_codegen::ir::FuncRef,   // (i64) -> i64
     set_error_tolerant: cranelift_codegen::ir::FuncRef, // (i64) -> void
@@ -1262,6 +1284,7 @@ impl HelperRefs {
             define_function: decl!(H_DEFINE_FUNCTION, [i64t, i64t], []),
             free_global: decl!(H_FREE_GLOBAL, [i64t], []),
             throw: decl!(H_THROW, [i64t], [i64t]),
+            recursion_overflow: decl!(H_RECURSION_OVERFLOW, [], []),
             error_check: decl!(H_ERROR_CHECK, [i64t], [i64t]),
             error_field: decl!(H_ERROR_FIELD, [i64t], [i64t]),
             set_error_tolerant: decl!(H_SET_ERROR_TOLERANT, [i64t], []),
@@ -1553,6 +1576,36 @@ impl GenericJitCompiler {
             let param_val = builder.block_params(entry)[i];
             builder.def_var(vars[i], param_val);
         }
+        // Depth counter is last param
+        let depth_var = Variable::from_u32(max_locals as u32);
+        builder.declare_var(depth_var, types::I64);
+        let depth_param = builder.block_params(entry)[chunk.param_count as usize];
+        builder.def_var(depth_var, depth_param);
+
+        // Depth check at function entry
+        let depth_val = builder.use_var(depth_var);
+        let limit = builder.ins().iconst(types::I64, 10000);
+        let too_deep = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, depth_val, limit);
+        let ok_block = builder.create_block();
+        let overflow_block = builder.create_block();
+        builder.ins().brif(too_deep, overflow_block, &[], ok_block, &[]);
+
+        // Overflow: set error and return void
+        builder.switch_to_block(overflow_block);
+        builder.seal_block(overflow_block);
+        builder.ins().call(helpers.recursion_overflow, &[]);
+        let void_ret = builder.ins().iconst(types::I64, Value::void().raw() as i64);
+        builder.ins().return_(&[void_ret]);
+
+        // Normal path continues
+        builder.switch_to_block(ok_block);
+        builder.seal_block(ok_block);
+
+        // Increment depth for this call
+        let one = builder.ins().iconst(types::I64, 1);
+        let new_depth = builder.ins().iadd(depth_val, one);
+        builder.def_var(depth_var, new_depth);
+
         // Initialize remaining locals to void
         let void_raw = Value::void().raw();
         let void_const = builder.ins().iconst(types::I64, void_raw as i64);
@@ -2050,7 +2103,9 @@ impl GenericJitCompiler {
                     }
                     args.reverse();
                     if target == chunk_idx {
-                        // Self-recursive call — context is in thread-locals
+                        // Self-recursive call — pass depth+1 as last arg
+                        let cur_depth = builder.use_var(depth_var);
+                        args.push(cur_depth);
                         let call = builder.ins().call(self_ref, &args);
                         vstack.push(builder.inst_results(call)[0]);
                     } else {

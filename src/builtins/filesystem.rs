@@ -71,8 +71,12 @@ fn simple_wildcard_match(pattern: &str, text: &str) -> bool {
 }
 
 fn builtin_cp(args: &[Value]) -> Result<Value, String> {
-    let Some(src) = args[0].as_str_ref() else { unreachable!() };
-    let Some(dst) = args[1].as_str_ref() else { unreachable!() };
+    let Some(src) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
+    let Some(dst) = args[1].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[1].type_name()));
+    };
     let src_path = Path::new(src);
     if src_path.is_dir() {
         copy_dir_recursive(src_path, Path::new(dst))
@@ -89,7 +93,9 @@ fn builtin_ls(args: &[Value]) -> Result<Value, String> {
     let path: &str = if args.is_empty() {
         "."
     } else {
-        let Some(s) = args[0].as_str_ref() else { unreachable!() };
+        let Some(s) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         s
     };
     let entries = fs::read_dir(path)
@@ -110,7 +116,9 @@ fn builtin_ls(args: &[Value]) -> Result<Value, String> {
 }
 
 fn builtin_glob(args: &[Value]) -> Result<Value, String> {
-    let Some(pattern) = args[0].as_str_ref() else { unreachable!() };
+    let Some(pattern) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let paths = glob_match(pattern)?;
     let items: Vec<Value> = paths.into_iter().map(|p| Value::string_from(&p)).collect();
     Ok(new_list(items))
@@ -118,14 +126,18 @@ fn builtin_glob(args: &[Value]) -> Result<Value, String> {
 
 pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     reg.add("read", &[Param::Required(Type::String)], Type::String, |args| {
-        let Some(path) = args[0].as_str_ref() else { unreachable!() };
+        let Some(path) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         fs::read_to_string(path)
             .map(|s| Value::string_from(&s))
             .map_err(|e| format!("read('{path}'): {e}"))
     })?;
 
     reg.add("write", &[Param::Required(Type::String), Param::Required(Type::Dyn)], Type::Void, |args| {
-        let Some(path) = args[0].as_str_ref() else { unreachable!() };
+        let Some(path) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         let content = args[1].to_string();
         fs::write(path, &content)
             .map(|()| Value::void())
@@ -134,7 +146,9 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
 
     reg.add("append", &[Param::Required(Type::String), Param::Required(Type::Dyn)], Type::Void, |args| {
         use std::io::Write;
-        let Some(path) = args[0].as_str_ref() else { unreachable!() };
+        let Some(path) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         let content = args[1].to_string();
         let mut file = fs::OpenOptions::new()
             .create(true)
@@ -147,29 +161,39 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     })?;
 
     reg.add("exists", &[Param::Required(Type::String)], Type::Bool, |args| {
-        let Some(s) = args[0].as_str_ref() else { unreachable!() };
+        let Some(s) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         Ok(Value::bool(Path::new(s).exists()))
     })?;
 
     reg.add("is_file", &[Param::Required(Type::String)], Type::Bool, |args| {
-        let Some(s) = args[0].as_str_ref() else { unreachable!() };
+        let Some(s) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         Ok(Value::bool(Path::new(s).is_file()))
     })?;
 
     reg.add("is_dir", &[Param::Required(Type::String)], Type::Bool, |args| {
-        let Some(s) = args[0].as_str_ref() else { unreachable!() };
+        let Some(s) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         Ok(Value::bool(Path::new(s).is_dir()))
     })?;
 
     reg.add("mkdir", &[Param::Required(Type::String)], Type::Void, |args| {
-        let Some(path) = args[0].as_str_ref() else { unreachable!() };
+        let Some(path) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         fs::create_dir_all(path)
             .map(|()| Value::void())
             .map_err(|e| format!("mkdir('{path}'): {e}"))
     })?;
 
     reg.add("rm", &[Param::Required(Type::String)], Type::Void, |args| {
-        let Some(path) = args[0].as_str_ref() else { unreachable!() };
+        let Some(path) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         let p = Path::new(path);
         if p.is_dir() {
             fs::remove_dir_all(p)
@@ -183,8 +207,12 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     reg.add("cp", &[Param::Required(Type::String), Param::Required(Type::String)], Type::Void, builtin_cp)?;
 
     reg.add("mv", &[Param::Required(Type::String), Param::Required(Type::String)], Type::Void, |args| {
-        let Some(src) = args[0].as_str_ref() else { unreachable!() };
-        let Some(dst) = args[1].as_str_ref() else { unreachable!() };
+        let Some(src) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
+        let Some(dst) = args[1].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[1].type_name()));
+        };
         fs::rename(src, dst)
             .map(|()| Value::void())
             .map_err(|e| format!("mv('{src}', '{dst}'): {e}"))
@@ -199,14 +227,18 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     })?;
 
     reg.add("cd", &[Param::Required(Type::String)], Type::Void, |args| {
-        let Some(path) = args[0].as_str_ref() else { unreachable!() };
+        let Some(path) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         std::env::set_current_dir(path)
             .map(|()| Value::void())
             .map_err(|e| format!("cd('{path}'): {e}"))
     })?;
 
     reg.add("basename", &[Param::Required(Type::String)], Type::String, |args| {
-        let Some(s) = args[0].as_str_ref() else { unreachable!() };
+        let Some(s) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         let name = Path::new(s)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -215,7 +247,9 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     })?;
 
     reg.add("dirname", &[Param::Required(Type::String)], Type::String, |args| {
-        let Some(s) = args[0].as_str_ref() else { unreachable!() };
+        let Some(s) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         let dir = Path::new(s)
             .parent()
             .map(|p| p.to_string_lossy().to_string())
@@ -224,7 +258,9 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     })?;
 
     reg.add("ext", &[Param::Required(Type::String)], Type::String, |args| {
-        let Some(s) = args[0].as_str_ref() else { unreachable!() };
+        let Some(s) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         let extension = Path::new(s)
             .extension()
             .map(|e| e.to_string_lossy().to_string())
@@ -233,7 +269,9 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     })?;
 
     reg.add("abs", &[Param::Required(Type::String)], Type::String, |args| {
-        let Some(path) = args[0].as_str_ref() else { unreachable!() };
+        let Some(path) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         let abs = fs::canonicalize(path)
             .map_err(|e| format!("abs('{path}'): {e}"))?;
         Ok(Value::string_from(&abs.to_string_lossy()))
@@ -259,7 +297,9 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     })?;
 
     reg.add("filesize", &[Param::Required(Type::String)], Type::Int, |args| {
-        let Some(path) = args[0].as_str_ref() else { unreachable!() };
+        let Some(path) = args[0].as_str_ref() else {
+            return Err(format!("expected string, got {}", args[0].type_name()));
+        };
         let meta = fs::metadata(path)
             .map_err(|e| format!("filesize('{path}'): {e}"))?;
         Ok(Value::int(i64::try_from(meta.len()).unwrap_or(i64::MAX)))

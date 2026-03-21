@@ -2,19 +2,25 @@ use crate::interpreter::value::Value;
 use super::registry::{BuiltinRegistry, Param, Type};
 
 fn md5(args: &[Value]) -> Result<Value, String> {
-    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let result = md5_compute(s.as_bytes());
     Ok(Value::string_from(&bytes_to_hex(&result)))
 }
 
 fn sha256(args: &[Value]) -> Result<Value, String> {
-    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let result = sha256_compute(s.as_bytes());
     Ok(Value::string_from(&bytes_to_hex(&result)))
 }
 
 fn sha512(args: &[Value]) -> Result<Value, String> {
-    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let result = sha512_compute(s.as_bytes());
     Ok(Value::string_from(&bytes_to_hex(&result)))
 }

@@ -25,7 +25,9 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
 // === JSON ===
 
 fn builtin_from_json(args: &[Value]) -> Result<Value, String> {
-    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let json: serde_json::Value = serde_json::from_str(s)
         .map_err(|e| format!("from_json(): {e}"))?;
     Ok(json_to_value(&json))
@@ -90,7 +92,9 @@ fn value_to_json(val: &Value) -> Result<serde_json::Value, String> {
 // === TOML ===
 
 fn builtin_from_toml(args: &[Value]) -> Result<Value, String> {
-    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let toml_val: toml::Value = s.parse()
         .map_err(|e| format!("from_toml(): {e}"))?;
     Ok(toml_to_value(&toml_val))
@@ -148,7 +152,9 @@ fn value_to_toml(val: &Value) -> Result<toml::Value, String> {
 // === YAML ===
 
 fn builtin_from_yaml(args: &[Value]) -> Result<Value, String> {
-    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let yaml: serde_yaml::Value = serde_yaml::from_str(s)
         .map_err(|e| format!("from_yaml(): {e}"))?;
     Ok(yaml_to_value(&yaml))
@@ -216,7 +222,9 @@ fn value_to_yaml(val: &Value) -> Result<serde_yaml::Value, String> {
 // === CSV ===
 
 fn builtin_from_csv(args: &[Value]) -> Result<Value, String> {
-    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let mut lines = s.lines();
     let header: Vec<&str> = match lines.next() {
         Some(h) => h.split(',').map(str::trim).collect(),
@@ -237,7 +245,9 @@ fn builtin_from_csv(args: &[Value]) -> Result<Value, String> {
 }
 
 fn builtin_to_csv(args: &[Value]) -> Result<Value, String> {
-    let Some(items_ref) = args[0].as_list_ref() else { unreachable!() };
+    let Some(items_ref) = args[0].as_list_ref() else {
+        return Err(format!("expected list, got {}", args[0].type_name()));
+    };
     let items = items_ref.borrow();
     if items.is_empty() {
         return Ok(Value::string_from(""));
@@ -266,12 +276,16 @@ fn builtin_to_csv(args: &[Value]) -> Result<Value, String> {
 // === Base64 ===
 
 fn builtin_to_base64(args: &[Value]) -> Result<Value, String> {
-    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     Ok(Value::string_from(&base64_encode(s.as_bytes())))
 }
 
 fn builtin_from_base64(args: &[Value]) -> Result<Value, String> {
-    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let bytes = base64_decode(s)?;
     String::from_utf8(bytes)
         .map(|s| Value::string_from(&s))
@@ -326,14 +340,18 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
 
 fn builtin_to_hex(args: &[Value]) -> Result<Value, String> {
     use std::fmt::Write;
-    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let mut hex = String::with_capacity(s.len() * 2);
     for b in s.bytes() { let _ = write!(hex, "{b:02x}"); }
     Ok(Value::string_from(&hex))
 }
 
 fn builtin_from_hex(args: &[Value]) -> Result<Value, String> {
-    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let mut bytes = Vec::new();
     let chars: Vec<char> = s.chars().collect();
     for pair in chars.chunks(2) {
@@ -352,7 +370,9 @@ fn builtin_from_hex(args: &[Value]) -> Result<Value, String> {
 // === URL Encoding ===
 
 fn builtin_url_encode(args: &[Value]) -> Result<Value, String> {
-    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let mut result = String::new();
     for b in s.bytes() {
         match b {
@@ -371,7 +391,9 @@ fn builtin_url_encode(args: &[Value]) -> Result<Value, String> {
 }
 
 fn builtin_url_decode(args: &[Value]) -> Result<Value, String> {
-    let Some(s) = args[0].as_str_ref() else { unreachable!() };
+    let Some(s) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
     let mut result = Vec::new();
     let bytes = s.as_bytes();
     let mut i = 0;
