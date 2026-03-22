@@ -6,6 +6,7 @@ pub mod exec;
 pub mod errors;
 pub mod migrate;
 pub mod vm;
+pub mod ffi;
 
 // Public API
 pub use interpreter::Interpreter;
