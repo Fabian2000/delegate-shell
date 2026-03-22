@@ -190,8 +190,17 @@ impl Interpreter {
         match mode {
             crate::vm::ExecutionMode::TreeWalk | crate::vm::ExecutionMode::Auto => {
                 for stmt in stmts {
-                    if let FlowSignal::Return(_) = self.exec_stmt(stmt)? {
-                        break;
+                    match self.exec_stmt(stmt)? {
+                        FlowSignal::Return(_) => {
+                            return Err("'return' outside of function".to_string());
+                        }
+                        FlowSignal::Break => {
+                            return Err("'break' outside of loop".to_string());
+                        }
+                        FlowSignal::Continue => {
+                            return Err("'continue' outside of loop".to_string());
+                        }
+                        FlowSignal::None => {}
                     }
                 }
                 Ok(())
