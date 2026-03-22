@@ -158,6 +158,8 @@ pub enum Op {
     BranchIfLocalLteImm, // +2 bytes (slot) + 8 bytes (i64 imm) + 4 bytes (offset)
     /// push local[slot] (int only, no clone overhead)
     GetLocalInt,      // +2 bytes (slot)
+    /// Convert stack top from int to float (widening). No-op if already float.
+    IntToFloat,
 }
 
 /// Constant pool: interned strings shared across a chunk.

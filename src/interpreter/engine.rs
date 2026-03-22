@@ -657,10 +657,13 @@ impl Interpreter {
         if error_tolerant {
             match result {
                 Ok(val) => {
-                    if !is_dyn
-                        && let Some(ann) = type_ann {
+                    let val = if !is_dyn {
+                        if let Some(ann) = type_ann {
+                            let val = widen_if_needed(ann, val);
                             check_type_annotation(ann, &val, name)?;
-                        }
+                            val
+                        } else { val }
+                    } else { val };
                     self.env.set_dyn(name, MaybeError::Ok(val), is_dyn)?;
                 }
                 Err(msg) if msg.starts_with("\x00FATAL\x00") => {
@@ -673,10 +676,13 @@ impl Interpreter {
                 Ok(v) => v,
                 Err(msg) => return Err(msg.trim_start_matches("\x00FATAL\x00").to_string()),
             };
-            if !is_dyn
-                && let Some(ann) = type_ann {
+            let val = if !is_dyn {
+                if let Some(ann) = type_ann {
+                    let val = widen_if_needed(ann, val);
                     check_type_annotation(ann, &val, name)?;
-                }
+                    val
+                } else { val }
+            } else { val };
             self.env.set_dyn(name, MaybeError::Ok(val), is_dyn)?;
         }
         Ok(FlowSignal::None)
@@ -1386,14 +1392,17 @@ impl Interpreter {
         self.env.push_scope();
         // Bind required params: check annotation > inferred type (skip if dyn)
         for ((param, ann, is_dyn), val) in func.params.iter().zip(args.iter()) {
-            if !is_dyn {
+            let val = if !is_dyn {
                 if let Some(ann) = ann {
-                    if let Err(e) = check_type_annotation(ann, val, param) {
+                    let widened = widen_if_needed(ann, val.clone());
+                    if let Err(e) = check_type_annotation(ann, &widened, param) {
                         self.env.pop_scope();
                         return Some(Err(e));
                     }
-                } else if let Some(inferred) = func.inferred_types.get(param)
-                    && check_type_annotation(inferred, val, param).is_err() {
+                    widened
+                } else if let Some(inferred) = func.inferred_types.get(param) {
+                    let widened = widen_if_needed(inferred, val.clone());
+                    if check_type_annotation(inferred, &widened, param).is_err() {
                         let source = if func.body_inferred_params.contains(param) {
                             "inferred from body"
                         } else {
@@ -1405,8 +1414,10 @@ impl Interpreter {
                             param, name, source, inferred.type_name(), val.type_name()
                         )));
                     }
-            }
-            self.env.set_local(param, MaybeError::Ok(val.clone()));
+                    widened
+                } else { val.clone() }
+            } else { val.clone() };
+            self.env.set_local(param, MaybeError::Ok(val));
         }
         // Bind optional params: check annotation > inferred type (skip if dyn)
         for (i, (opt_param, ann, is_dyn)) in func.optional_params.iter().enumerate() {
@@ -1711,6 +1722,19 @@ fn values_match(a: &Value, b: &Value) -> bool {
 
 /// Validate `val` against a `TypeAnnotation`, returning a non-catchable error on mismatch.
 /// The `context` string is used in the error message (e.g. a variable name or "return value of 'fn'").
+/// Apply int->float widening if the annotation expects float and the value is int.
+/// Returns the (possibly converted) value.
+fn widen_if_needed(ann: &TypeAnnotation, val: Value) -> Value {
+    if let TypeAnnotation::Simple(expected) = ann {
+        if expected == "float" {
+            if let Some(n) = val.as_int() {
+                return Value::float(n as f64);
+            }
+        }
+    }
+    val
+}
+
 fn check_type_annotation(ann: &TypeAnnotation, val: &Value, context: &str) -> Result<(), String> {
     match ann {
         TypeAnnotation::Simple(expected_type) => {

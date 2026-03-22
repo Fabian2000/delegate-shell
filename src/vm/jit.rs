@@ -2482,6 +2482,43 @@ impl GenericJitCompiler {
                 // SCOPE (no-op in JIT)
                 // ============================================================
                 Op::PushScope | Op::PopScope => {}
+
+                Op::IntToFloat => {
+                    // Convert stack top: if int, widen to float
+                    if let Some(v) = vstack.last().copied() {
+                        // Check tag: is it TAG_INT?
+                        let tag = builder.ins().band_imm(v, NB_TAG_MASK as i64);
+                        let tag_int = builder.ins().iconst(types::I64, NB_TAG_INT as i64);
+                        let is_int = builder.ins().icmp(IntCC::Equal, tag, tag_int);
+
+                        let convert_block = builder.create_block();
+                        let skip_block = builder.create_block();
+                        let merge_block = builder.create_block();
+                        builder.append_block_param(merge_block, types::I64);
+
+                        builder.ins().brif(is_int, convert_block, &[], skip_block, &[]);
+
+                        // Convert: extract int, cast to f64, store as float bits
+                        builder.switch_to_block(convert_block);
+                        builder.seal_block(convert_block);
+                        let payload = builder.ins().band_imm(v, NB_PAYLOAD_MASK as i64);
+                        let sign_extended = builder.ins().ishl_imm(payload, 16);
+                        let sign_extended = builder.ins().sshr_imm(sign_extended, 16);
+                        let as_float = builder.ins().fcvt_from_sint(types::F64, sign_extended);
+                        let float_bits = builder.ins().bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), as_float);
+                        builder.ins().jump(merge_block, &[float_bits]);
+
+                        // Skip: already float or other type, keep as-is
+                        builder.switch_to_block(skip_block);
+                        builder.seal_block(skip_block);
+                        builder.ins().jump(merge_block, &[v]);
+
+                        builder.switch_to_block(merge_block);
+                        builder.seal_block(merge_block);
+                        let result = builder.block_params(merge_block)[0];
+                        *vstack.last_mut().expect("checked above") = result;
+                    }
+                }
             }
         }
 

@@ -86,7 +86,7 @@ impl Compiler {
     fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         let line = self.line(&stmt.span);
         match &stmt.kind {
-            StmtKind::Assign { name, expr, is_dyn: _, error_tolerant, type_ann: _ } => {
+            StmtKind::Assign { name, expr, is_dyn: _, error_tolerant, type_ann } => {
                 if *error_tolerant {
                     // Error-tolerant: wrap in TryBegin/TryEnd
                     let try_jump = self.chunk.emit_jump(Op::TryBegin, line);
@@ -115,6 +115,12 @@ impl Compiler {
                                     return Ok(());
                                 }
                     self.compile_expr(expr)?;
+                    // int->float widening when annotation says float
+                    if let Some(crate::parser::ast::TypeAnnotation::Simple(t)) = type_ann {
+                        if t == "float" {
+                            self.chunk.emit(Op::IntToFloat, line);
+                        }
+                    }
                     self.set_variable(name, line);
                 }
             }

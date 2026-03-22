@@ -963,6 +963,15 @@ impl VM {
                     self.stack.push(val);
                 }
 
+                Op::IntToFloat => {
+                    let len = self.stack.len();
+                    if len > 0 {
+                        if let Some(n) = self.stack[len - 1].as_int() {
+                            self.stack[len - 1] = Value::float(n as f64);
+                        }
+                    }
+                }
+
                 // ============================================================
                 // SEND OPERATOR
                 // ============================================================
@@ -1539,6 +1548,7 @@ fn patch_global_slots(code: &mut [u8], slot_remap: &std::collections::HashMap<u1
             | Op::StringAppendLocal
             | Op::GetDollarIndex | Op::GetDollarField
             | Op::Import | Op::GetLocalInt => pc += 2,
+            Op::IntToFloat => {},
             _ => {} // 0-operand opcodes
         }
     }

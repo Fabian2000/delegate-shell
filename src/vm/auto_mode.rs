@@ -135,7 +135,7 @@ fn score_chunk(chunk: &Chunk) -> (u32, u32) {
             // Neutral
             Op::Return | Op::ReturnVoid | Op::Pop | Op::Dup | Op::CheckCancel => {}
             Op::DefineFunction => { pc += 4; continue; }
-            Op::PushScope | Op::PopScope => {}
+            Op::PushScope | Op::PopScope | Op::IntToFloat => {}
 
             // Float: JIT can handle but not as big a win
             Op::LoadFloat => { jit += 1; pc += 8; continue; }
