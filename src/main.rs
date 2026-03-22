@@ -1,9 +1,11 @@
 use std::env;
 use std::fs;
-use std::io::{self, Write, BufRead};
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use delegate_shell::Interpreter;
+
+mod shell;
 
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
@@ -11,13 +13,24 @@ fn main() {
     ctrlc_handler();
 
     let raw_args: Vec<String> = env::args().collect();
-    // Separate flags from positional args
+
+    // Handle flags before filtering
+    if raw_args.iter().any(|a| a == "--version" || a == "-v") {
+        println!("dgsh {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if raw_args.iter().any(|a| a == "--help" || a == "-h") {
+        print_help();
+        return;
+    }
+
     let args: Vec<String> = std::iter::once(raw_args[0].clone())
         .chain(raw_args.iter().skip(1).filter(|a| !a.starts_with("--")).cloned())
         .collect();
 
     if args.len() < 2 {
-        run_repl();
+        let mut engine = make_engine(&raw_args);
+        shell::repl::run(&mut engine);
         return;
     }
 
@@ -42,18 +55,7 @@ fn main() {
         }
     };
 
-    let mut engine = Interpreter::new().unwrap_or_else(|e| {
-        eprintln!("Failed to initialize: {e}");
-        std::process::exit(1);
-    });
-    // Execution mode override (default: Auto)
-    if raw_args.iter().any(|a| a == "--vm") {
-        let _ = engine.set_execution_mode(delegate_shell::ExecutionMode::Vm);
-    } else if raw_args.iter().any(|a| a == "--jit") {
-        let _ = engine.set_execution_mode(delegate_shell::ExecutionMode::Jit);
-    } else if raw_args.iter().any(|a| a == "--tw") {
-        let _ = engine.set_execution_mode(delegate_shell::ExecutionMode::TreeWalk);
-    }
+    let mut engine = make_engine(&raw_args);
     engine.cancel_flag = Some(&CANCELLED);
     if let Err(e) = engine.run_source(&source) {
         if let Some(code_str) = e.strip_prefix("\x00EXIT\x00") {
@@ -63,6 +65,37 @@ fn main() {
         eprintln!("Runtime error: {e}");
         std::process::exit(1);
     }
+}
+
+fn make_engine(raw_args: &[String]) -> Interpreter {
+    let mut engine = Interpreter::new().unwrap_or_else(|e| {
+        eprintln!("Failed to initialize: {e}");
+        std::process::exit(1);
+    });
+    if raw_args.iter().any(|a| a == "--vm") {
+        let _ = engine.set_execution_mode(delegate_shell::ExecutionMode::Vm);
+    } else if raw_args.iter().any(|a| a == "--jit") {
+        let _ = engine.set_execution_mode(delegate_shell::ExecutionMode::Jit);
+    } else if raw_args.iter().any(|a| a == "--tw") {
+        let _ = engine.set_execution_mode(delegate_shell::ExecutionMode::TreeWalk);
+    }
+    engine
+}
+
+fn print_help() {
+    eprintln!("Usage: dgsh [options] [script.dgsh]");
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  -c '<code>'     Execute code string");
+    eprintln!("  -e '<code>'     Execute code string (alias for -c)");
+    eprintln!("  -migrate <file> Migrate a bash script to dgsh");
+    eprintln!("  --vm            Force bytecode VM execution");
+    eprintln!("  --jit           Force JIT compilation");
+    eprintln!("  --tw            Force tree-walk interpretation");
+    eprintln!("  --version, -v   Show version");
+    eprintln!("  --help, -h      Show this help");
+    eprintln!();
+    eprintln!("Without arguments, starts an interactive REPL.");
 }
 
 fn run_migrate(args: &[String]) {
@@ -114,68 +147,6 @@ fn run_migrate(args: &[String]) {
     } else {
         print!("{result}");
         eprintln!("  {input_lines} lines read, {output_lines} lines output, {todo_count} TODOs");
-    }
-}
-
-fn run_repl() {
-    let stdin = io::stdin();
-    let mut interp = Interpreter::new().unwrap_or_else(|e| {
-        eprintln!("Failed to initialize: {e}");
-        std::process::exit(1);
-    });
-
-    eprintln!("dgsh REPL -- type 'exit' to quit");
-
-    loop {
-        eprint!(">> ");
-        let _ = io::stderr().flush();
-
-        let mut line = String::new();
-        match stdin.lock().read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("Read error: {e}");
-                break;
-            }
-        }
-
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed == "exit" || trimmed == "exit()" {
-            break;
-        }
-
-        // Collect multi-line blocks
-        let mut source = line.clone();
-        if trimmed.ends_with(':') || trimmed.starts_with("if ")
-            || trimmed.starts_with("for ") || trimmed.starts_with("while ")
-        {
-            loop {
-                eprint!(".. ");
-                let _ = io::stderr().flush();
-                let mut next = String::new();
-                match stdin.lock().read_line(&mut next) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        if next.trim().is_empty() {
-                            break;
-                        }
-                        source.push_str(&next);
-                    }
-                }
-            }
-        }
-
-        if let Err(e) = interp.run_source(&source) {
-            if let Some(code_str) = e.strip_prefix("\x00EXIT\x00") {
-                let code: i32 = code_str.parse().unwrap_or(1);
-                std::process::exit(code);
-            }
-            eprintln!("Error: {e}");
-        }
     }
 }
 

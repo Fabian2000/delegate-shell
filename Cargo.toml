@@ -21,6 +21,8 @@ cranelift-native = "0.116"
 hostname = "0.4.2"
 indexmap = "2.13.0"
 regex = "1.12.3"
+rustyline = "17.0.2"
+rustyline-derive = "0.11.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 serde_yaml = "0.9.34"

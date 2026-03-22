@@ -37,9 +37,9 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 
 /// Try to execute an external command. Returns None if the command is not found on PATH.
 #[must_use]
-pub fn try_exec_command(name: &str, args: &[Value]) -> Option<Result<Value, String>> {
+pub fn try_exec_command(name: &str, args: &[Value], interactive: bool) -> Option<Result<Value, String>> {
     let path = find_on_path(name)?;
-    Some(exec_command(path, name, args))
+    Some(exec_command(path, name, args, interactive))
 }
 
 /// Execute a command at a specific path (used by `use` keyword).
@@ -47,12 +47,30 @@ pub fn try_exec_command(name: &str, args: &[Value]) -> Option<Result<Value, Stri
 /// # Errors
 ///
 /// Returns an error if the command fails to execute.
-pub fn exec_path(path: &str, args: &[Value]) -> Result<Value, String> {
-    exec_command(PathBuf::from(path), path, args)
+pub fn exec_path(path: &str, args: &[Value], interactive: bool) -> Result<Value, String> {
+    exec_command(PathBuf::from(path), path, args, interactive)
 }
 
-fn exec_command(path: PathBuf, name: &str, args: &[Value]) -> Result<Value, String> {
+fn exec_command(path: PathBuf, name: &str, args: &[Value], interactive: bool) -> Result<Value, String> {
     let str_args: Vec<String> = args.iter().map(value_to_arg).collect();
+
+    if interactive {
+        use std::process::Stdio;
+        let status = Command::new(path)
+            .args(&str_args)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(|e| format!("Failed to execute '{name}': {e}"))?;
+
+        let code = status.code().unwrap_or(-1);
+        return Ok(Value::command_result(crate::interpreter::value::CommandResultData {
+            status: code,
+            out: String::new(),
+            err: String::new(),
+        }));
+    }
 
     let output = Command::new(path)
         .args(&str_args)
@@ -63,7 +81,6 @@ fn exec_command(path: PathBuf, name: &str, args: &[Value]) -> Result<Value, Stri
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    // Exes never throw — always return Result { status, out, err }
     Ok(Value::command_result(crate::interpreter::value::CommandResultData {
         status,
         out: stdout,

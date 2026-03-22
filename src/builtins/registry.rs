@@ -165,6 +165,11 @@ impl BuiltinRegistry {
         self.defs.get(name).map(|e| e.params)
     }
 
+    /// Get all registered builtin names.
+    pub fn names(&self) -> Vec<String> {
+        self.defs.keys().cloned().collect()
+    }
+
     /// Check whether a name is a registered builtin.
     pub fn is_builtin(&self, name: &str) -> bool {
         self.defs.contains_key(name)

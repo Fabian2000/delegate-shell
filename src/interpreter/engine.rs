@@ -26,6 +26,8 @@ pub struct Interpreter {
     allow_builtins: bool,
     /// When true, network builtins (http_get, http_post, etc.) are available.
     allow_network: bool,
+    /// When true, executables run interactively (stdin/stdout/stderr inherited).
+    pub(crate) interactive: bool,
     /// Current call depth for recursion limit
     call_depth: usize,
     /// Maximum allowed call depth
@@ -53,6 +55,7 @@ impl Interpreter {
             allow_exec: true,
             allow_builtins: true,
             allow_network: true,
+            interactive: false,
             call_depth: 0,
             max_call_depth: 10000,
         })
@@ -87,6 +90,11 @@ impl Interpreter {
         self.allow_builtins
     }
 
+    /// Set interactive mode for executables (stdin/stdout/stderr inherited).
+    pub fn set_interactive(&mut self, interactive: bool) {
+        self.interactive = interactive;
+    }
+
     /// Whether network access is allowed.
     pub fn allow_network(&self) -> bool {
         self.allow_network
@@ -114,6 +122,11 @@ impl Interpreter {
         f: impl Fn(&[Value], &mut Interpreter) -> Result<Value, String> + 'static,
     ) -> Result<(), String> {
         self.registry.register(name, params, returns, f)
+    }
+
+    /// Get all registered builtin function names (for tab-completion etc.)
+    pub fn builtin_names(&self) -> Vec<String> {
+        self.registry.names()
     }
 
     /// Parse and execute source code directly.
@@ -1060,13 +1073,14 @@ impl Interpreter {
             Resolution::Normal => {
                 // alias → use_paths → exe → own → system
                 if self.allow_exec {
+                    let interactive = self.interactive;
                     if let Some(target) = self.env.aliases.get(lower).cloned() {
-                        return exec::exec_path(&target, &args);
+                        return exec::exec_path(&target, &args, interactive);
                     }
                     if let Some(use_path) = self.env.use_paths.get(lower).cloned() {
-                        return exec::exec_path(&use_path, &args);
+                        return exec::exec_path(&use_path, &args, interactive);
                     }
-                    if let Some(result) = exec::try_exec_command(lower, &args) {
+                    if let Some(result) = exec::try_exec_command(lower, &args, interactive) {
                         return result;
                     }
                 }
