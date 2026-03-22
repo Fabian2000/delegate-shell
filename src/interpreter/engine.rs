@@ -566,7 +566,7 @@ impl Interpreter {
                 if !self.allow_exec {
                     return Err("alias is disabled when exec is not allowed".to_string());
                 }
-                self.env.aliases.insert(name.to_ascii_lowercase(), target.clone());
+                self.env.aliases.insert(name.to_string(), target.clone());
                 Ok(FlowSignal::None)
             }
         }
@@ -832,7 +832,7 @@ impl Interpreter {
             let name = alias.unwrap_or_else(||
                 p.file_stem().and_then(|s| s.to_str()).unwrap_or(path)
             );
-            self.env.use_paths.insert(name.to_ascii_lowercase(), path.to_owned());
+            self.env.use_paths.insert(name.to_string(), path.to_owned());
         } else if p.is_dir() {
             let entries = std::fs::read_dir(p)
                 .map_err(|e| format!("use '{path}': {e}"))?;
@@ -1282,12 +1282,10 @@ impl Interpreter {
 
     /// Call a dgsh function by name. Looks up user functions first, then builtins.
     pub fn call_function(&mut self, name: &str, args: Vec<Value>) -> Result<Value, String> {
-        let lower_cow = crate::interpreter::env::to_lower_pub(name);
-        let lower = lower_cow.as_ref();
-        if let Some(result) = self.call_user_fn(lower, args.clone()) {
+        if let Some(result) = self.call_user_fn(name, args.clone()) {
             return result;
         }
-        if let Some(result) = self.call_builtin(lower, &args) {
+        if let Some(result) = self.call_builtin(name, &args) {
             return result;
         }
         Err(format!("Undefined function: '{name}'"))
@@ -1295,11 +1293,8 @@ impl Interpreter {
 
     /// Internal: call with full resolution (alias → exe → own → system).
     pub(crate) fn call_resolved(&mut self, name: &str, resolution: Resolution, args: Vec<Value>) -> Result<Value, String> {
-        let lower_cow = crate::interpreter::env::to_lower_pub(name);
-        let lower = lower_cow.as_ref();
-
         // Check if name is a variable holding a lambda
-        if let Some(MaybeError::Ok(val)) = self.env.get(lower)
+        if let Some(MaybeError::Ok(val)) = self.env.get(name)
             && let Some(data) = val.as_lambda() {
                 let data = data.clone();
                 if !data.bound_args.is_empty() && !args.is_empty() {
@@ -1319,37 +1314,37 @@ impl Interpreter {
                 // alias → use_paths → exe → own → system
                 if self.allow_exec {
                     let interactive = self.interactive;
-                    if let Some(target) = self.env.aliases.get(lower).cloned() {
+                    if let Some(target) = self.env.aliases.get(name).cloned() {
                         return exec::exec_path(&target, &args, interactive);
                     }
-                    if let Some(use_path) = self.env.use_paths.get(lower).cloned() {
+                    if let Some(use_path) = self.env.use_paths.get(name).cloned() {
                         return exec::exec_path(&use_path, &args, interactive);
                     }
-                    if let Some(result) = exec::try_exec_command(lower, &args, interactive) {
+                    if let Some(result) = exec::try_exec_command(name, &args, interactive) {
                         return result;
                     }
                 }
-                if let Some(result) = self.call_user_fn(lower, args.clone()) {
+                if let Some(result) = self.call_user_fn(name, args.clone()) {
                     return result;
                 }
-                if let Some(result) = self.call_builtin(lower, &args) {
+                if let Some(result) = self.call_builtin(name, &args) {
                     return result;
                 }
                 Err(format!("Undefined: '{name}' (not found as exe, function, or built-in)"))
             }
             Resolution::OwnFirst => {
                 // own → system
-                if let Some(result) = self.call_user_fn(lower, args.clone()) {
+                if let Some(result) = self.call_user_fn(name, args.clone()) {
                     return result;
                 }
-                if let Some(result) = self.call_builtin(lower, &args) {
+                if let Some(result) = self.call_builtin(name, &args) {
                     return result;
                 }
                 Err(format!("Undefined: '{name}' (not found as function or built-in)"))
             }
             Resolution::SystemOnly => {
                 // system only
-                if let Some(result) = self.call_builtin(lower, &args) {
+                if let Some(result) = self.call_builtin(name, &args) {
                     return result;
                 }
                 Err(format!("Undefined: '{name}' (not a built-in function)"))
@@ -1483,7 +1478,7 @@ impl Interpreter {
                 .map(|expected| ret_type == expected || ret_type == "void" || expected == "void")
                 .unwrap_or(false);
             if !already_matches {
-                let fn_name_lower = name.to_ascii_lowercase();
+                let fn_name_lower = name.to_string();
                 if let Some(live_func) = self.env.functions.get_mut(&fn_name_lower) {
                     if let Some(ref expected) = live_func.return_type {
                         if ret_type != *expected && ret_type != "void" && expected != "void" {
@@ -1500,7 +1495,7 @@ impl Interpreter {
 
         // Call-site inference: record types for unannotated, non-dyn params on first call
         {
-            let fn_name_lower = name.to_ascii_lowercase();
+            let fn_name_lower = name.to_string();
             if let Some(live_func) = self.env.functions.get_mut(&fn_name_lower) {
                 for ((param, ann, is_dyn), val) in func.params.iter().zip(args.iter()) {
                     if *is_dyn || ann.is_some() || live_func.inferred_types.contains_key(param) {

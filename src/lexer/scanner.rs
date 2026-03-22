@@ -226,10 +226,10 @@ impl Lexer {
         }
 
         let raw: String = self.source[start..self.pos].iter().collect();
-        let lower = raw.to_ascii_lowercase();
         let span = Span { start, end: self.pos };
 
-        let token = match lower.as_str() {
+        // Keywords are matched case-insensitively, identifiers keep original case
+        let token = match raw.to_ascii_lowercase().as_str() {
             "if" => Token::If,
             "else" => Token::Else,
             "for" => Token::For,
@@ -251,7 +251,7 @@ impl Lexer {
             "atomic" => Token::Atomic,
             "dyn" => Token::Dyn,
             "alias" => Token::Alias,
-            _ => Token::Ident(lower),
+            _ => Token::Ident(raw),
         };
 
         SpannedToken { token, span }
@@ -479,7 +479,7 @@ impl Lexer {
                     if c.is_ascii_alphanumeric() || c == '_' { self.advance(); } else { break; }
                 }
                 let field: String = self.source[suffix_start..self.pos].iter().collect();
-                Token::DollarField(field.to_ascii_lowercase())
+                Token::DollarField(field)
             }
             _ => Token::Dollar, // bare $
         };

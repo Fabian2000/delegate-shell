@@ -1,23 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::borrow::Cow;
 use crate::interpreter::value::{MaybeError, ObjectData};
 use crate::parser::ast::{Stmt, TypeAnnotation};
-
-/// Lowercase a string, avoiding allocation if it's already lowercase.
-#[inline]
-#[must_use]
-pub fn to_lower_pub(s: &str) -> Cow<'_, str> {
-    to_lower(s)
-}
-
-#[inline]
-fn to_lower(s: &str) -> Cow<'_, str> {
-    if s.bytes().all(|b| !b.is_ascii_uppercase()) {
-        Cow::Borrowed(s)
-    } else {
-        Cow::Owned(s.to_ascii_lowercase())
-    }
-}
 
 /// A user-defined function
 #[derive(Debug, Clone)]
@@ -114,10 +97,9 @@ impl Environment {
     ///
     /// Panics if the scopes stack is empty (should never happen).
     pub fn set(&mut self, name: &str, value: MaybeError) -> Result<(), String> {
-        let key = to_lower(name);
         // Check if variable exists in any scope — update it there
         for scope in self.scopes.iter_mut().rev() {
-            if let Some(slot) = scope.get_mut(key.as_ref()) {
+            if let Some(slot) = scope.get_mut(name) {
                 // If existing is Atomic, store into it instead of replacing
                 if let (MaybeError::Ok(existing), MaybeError::Ok(new_val)) = (&slot, &value)
                     && let Some(a) = existing.as_atomic() {
@@ -145,7 +127,7 @@ impl Environment {
         // Otherwise create in current scope
         let scope = self.scopes.last_mut()
             .ok_or_else(|| "Internal error: no scope available".to_string())?;
-        scope.insert(key.into_owned(), value);
+        scope.insert(name.to_string(), value);
         Ok(())
     }
 
@@ -156,18 +138,16 @@ impl Environment {
 
     /// Set a variable strictly in the current (innermost) scope — used for function parameters.
     pub fn set_local(&mut self, name: &str, value: MaybeError) {
-        let key = to_lower(name);
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(key.into_owned(), value);
+            scope.insert(name.to_string(), value);
         }
     }
 
     /// Get a variable — searches from innermost to outermost scope
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&MaybeError> {
-        let key = to_lower(name);
         for scope in self.scopes.iter().rev() {
-            if let Some(val) = scope.get(key.as_ref()) {
+            if let Some(val) = scope.get(name) {
                 return Some(val);
             }
         }
@@ -176,9 +156,8 @@ impl Environment {
 
     /// Get a mutable reference to a variable — searches from innermost to outermost scope.
     pub fn get_mut(&mut self, name: &str) -> Option<&mut MaybeError> {
-        let key = to_lower(name);
         for scope in self.scopes.iter_mut().rev() {
-            if let Some(val) = scope.get_mut(key.as_ref()) {
+            if let Some(val) = scope.get_mut(name) {
                 return Some(val);
             }
         }
@@ -187,9 +166,8 @@ impl Environment {
 
     /// Remove a variable from all scopes. Returns true if found and removed.
     pub fn remove(&mut self, name: &str) -> bool {
-        let key = to_lower(name);
         for scope in self.scopes.iter_mut().rev() {
-            if scope.remove(key.as_ref()).is_some() {
+            if scope.remove(name).is_some() {
                 // Shrink only when capacity is more than 4x the length
                 // Avoids realloc on every free
                 if scope.capacity() > scope.len() * 4 + 16 {
@@ -203,14 +181,13 @@ impl Environment {
 
     /// Define a function
     pub fn define_fn(&mut self, func: UserFn) {
-        self.functions.insert(func.name.to_ascii_lowercase(), func);
+        self.functions.insert(func.name.clone(), func);
     }
 
     /// Look up a user-defined function
     #[must_use]
     pub fn get_fn(&self, name: &str) -> Option<&UserFn> {
-        let key = to_lower(name);
-        self.functions.get(key.as_ref())
+        self.functions.get(name)
     }
 
     /// Clone all user functions (for thread spawning)
