@@ -69,6 +69,29 @@ impl Environment {
         }
     }
 
+    /// Return all visible variables as (name, value_display, type_name) tuples.
+    pub fn all_variables(&self) -> Vec<(String, String, String)> {
+        let mut result = Vec::new();
+        let mut seen = HashSet::new();
+        // Innermost scope first (shadows outer)
+        for scope in self.scopes.iter().rev() {
+            for (name, maybe) in scope {
+                if seen.insert(name.clone()) {
+                    match maybe {
+                        MaybeError::Ok(val) => {
+                            result.push((name.clone(), val.to_string(), val.type_name().to_string()));
+                        }
+                        MaybeError::Err(err) => {
+                            result.push((name.clone(), format!("Error: {}", err.message), "error".to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        result
+    }
+
     pub fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
     }

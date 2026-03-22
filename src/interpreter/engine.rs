@@ -8,6 +8,40 @@ use crate::parser::ast::{
 };
 use crate::exec;
 
+/// Debug context passed to debug handlers when execution pauses.
+pub struct DebugContext {
+    /// Current line number (1-based, 0 if unknown)
+    pub line: usize,
+    /// Current column number (1-based, 0 if unknown)
+    pub column: usize,
+    /// Description of the current statement (e.g. "assign x", "call foo", "return 42")
+    pub statement: String,
+    /// Current function name (empty string if top-level)
+    pub function_name: String,
+    /// Current function parameters as "name: value" pairs
+    pub function_params: Vec<(String, String)>,
+    /// All visible variables as (name, value_string, type_name) tuples
+    pub variables: Vec<(String, String, String)>,
+    /// Call stack: list of function names (innermost last)
+    pub call_stack: Vec<String>,
+    /// Source file path (or "<repl>", "<stdin>")
+    pub file: String,
+    /// Source lines around the current line (line_number, content, is_current)
+    pub source_context: Vec<(usize, String, bool)>,
+}
+
+/// Action the debug handler returns to control execution flow.
+pub enum DebugAction {
+    /// Continue execution until next debugger() call
+    Continue,
+    /// Execute the next statement, then pause again
+    StepOver,
+    /// Step into function calls
+    StepInto,
+    /// Stop execution entirely
+    Quit,
+}
+
 pub struct Interpreter {
     pub(crate) env: Environment,
     /// Builtin function registry — owned per instance
@@ -30,6 +64,22 @@ pub struct Interpreter {
     call_depth: usize,
     /// Maximum allowed call depth
     max_call_depth: usize,
+    /// Debug handler callback — called when debugger() is hit or stepping
+    debug_handler: Option<Box<dyn Fn(&DebugContext) -> DebugAction>>,
+    /// Debug stepping state
+    debug_stepping: bool,
+    /// Call depth at which stepping was activated (for StepOver)
+    debug_step_depth: usize,
+    /// Whether to step into function calls
+    debug_step_into: bool,
+    /// Call stack for debug context
+    debug_call_stack: Vec<String>,
+    /// Current function params for debug context
+    debug_current_params: Vec<(String, String)>,
+    /// Source code for debug context (to show lines)
+    debug_source: String,
+    /// Current file being executed
+    debug_file: String,
 }
 
 /// Return control flow signal
@@ -48,9 +98,17 @@ impl Interpreter {
 
     /// Create an interpreter with a specific builtin access level.
     pub fn with_access(access: crate::builtins::registry::BuiltinAccess) -> Result<Self, String> {
+        let mut registry = crate::builtins::registry::build_registry(access, true)?;
+        // debugger() is always available regardless of access level
+        registry.register("debugger", &[], crate::builtins::registry::Type::Void,
+            |_args: &[Value], interp: &mut Interpreter| {
+                interp.trigger_debugger()?;
+                Ok(Value::void())
+            }
+        )?;
         Ok(Self {
             env: Environment::new(),
-            registry: crate::builtins::registry::build_registry(access, true)?,
+            registry,
             send_value: None,
             cancel_flag: None,
             execution_mode: crate::vm::ExecutionMode::Auto,
@@ -60,6 +118,14 @@ impl Interpreter {
             interactive: false,
             call_depth: 0,
             max_call_depth: 10000,
+            debug_handler: None,
+            debug_stepping: false,
+            debug_step_depth: 0,
+            debug_step_into: false,
+            debug_call_stack: Vec::new(),
+            debug_current_params: Vec::new(),
+            debug_source: String::new(),
+            debug_file: "<stdin>".to_string(),
         })
     }
 
@@ -94,6 +160,17 @@ impl Interpreter {
     /// Whether network access is allowed.
     pub fn allow_network(&self) -> bool {
         self.allow_network
+    }
+
+    /// Set a debug handler. Called when `debugger()` is executed or when stepping.
+    /// The handler receives a `DebugContext` and returns a `DebugAction`.
+    pub fn on_debug(&mut self, handler: impl Fn(&DebugContext) -> DebugAction + 'static) {
+        self.debug_handler = Some(Box::new(handler));
+    }
+
+    /// Set the debug file name (for display in debug output).
+    pub fn set_debug_file(&mut self, file: &str) {
+        self.debug_file = file.to_string();
     }
 
     /// Set the execution mode. Must be called before any code is executed.
@@ -142,6 +219,9 @@ impl Interpreter {
     ///
     /// Returns an error if parsing or execution fails.
     pub fn run_source(&mut self, source: &str) -> Result<(), String> {
+        if self.debug_handler.is_some() {
+            self.debug_source = source.to_string();
+        }
         let mut lexer = crate::lexer::Lexer::new(source);
         let tokens = lexer.tokenize();
         let stmts = crate::parser::parse(&tokens)?;
@@ -156,6 +236,9 @@ impl Interpreter {
     pub fn run_file(&mut self, path: &str) -> Result<(), String> {
         let source = std::fs::read_to_string(path)
             .map_err(|e| format!("Error reading '{path}': {e}"))?;
+        if self.debug_handler.is_some() {
+            self.debug_file = path.to_string();
+        }
         self.run_source(&source)
     }
 
@@ -234,11 +317,152 @@ impl Interpreter {
         }
     }
 
+    fn describe_stmt(stmt: &Stmt) -> String {
+        match &stmt.kind {
+            StmtKind::Assign { name, .. } => format!("assign {name}"),
+            StmtKind::CompoundAssign { name, op, .. } => format!("{name} {op:?}="),
+            StmtKind::IndexAssign { .. } => "index assign".to_string(),
+            StmtKind::FieldAssign { field, .. } => format!("field assign .{field}"),
+            StmtKind::PostIncDec { name, increment } | StmtKind::PreIncDec { name, increment } => {
+                if *increment { format!("{name}++") } else { format!("{name}--") }
+            }
+            StmtKind::ExprStmt(_) => "expression".to_string(),
+            StmtKind::FnDef { name, .. } => format!("define {name}()"),
+            StmtKind::If { .. } => "if".to_string(),
+            StmtKind::While { .. } => "while".to_string(),
+            StmtKind::For { var, .. } => format!("for {var}"),
+            StmtKind::Return { is_dyn, .. } => {
+                if *is_dyn { "dyn return".to_string() } else { "return".to_string() }
+            }
+            StmtKind::Import(path) => format!("import \"{path}\""),
+            StmtKind::Free(name) => format!("free {name}"),
+            StmtKind::Use { .. } => "use".to_string(),
+            StmtKind::Throw(_) => "throw".to_string(),
+            StmtKind::EnumDef { name, .. } => format!("enum {name}"),
+            StmtKind::Match { .. } => "match".to_string(),
+            StmtKind::Alias { name, target } => format!("alias {name} = {target}"),
+            StmtKind::Continue => "continue".to_string(),
+            StmtKind::Break => "break".to_string(),
+        }
+    }
+
+    /// Convert a byte offset to (line_number, column), both 1-based.
+    fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
+        let mut line = 1;
+        let mut col = 1;
+        for (i, ch) in source.char_indices() {
+            if i >= offset { break; }
+            if ch == '\n' { line += 1; col = 1; } else { col += 1; }
+        }
+        (line, col)
+    }
+
+    /// Get source lines around a given line (3 before, 3 after).
+    fn source_context_lines(source: &str, current_line: usize) -> Vec<(usize, String, bool)> {
+        let lines: Vec<&str> = source.lines().collect();
+        let start = current_line.saturating_sub(4); // 3 lines before (0-indexed)
+        let end = (current_line + 3).min(lines.len()); // 3 lines after
+        let mut result = Vec::new();
+        for i in start..end {
+            let line_num = i + 1; // 1-based
+            result.push((line_num, lines[i].to_string(), line_num == current_line));
+        }
+        result
+    }
+
+    fn build_debug_context(&self, stmt: &Stmt) -> DebugContext {
+        let (line, column) = Self::offset_to_line_col(&self.debug_source, stmt.span.start);
+        let source_context = Self::source_context_lines(&self.debug_source, line);
+        DebugContext {
+            line,
+            column,
+            statement: Self::describe_stmt(stmt),
+            function_name: self.debug_call_stack.last().cloned().unwrap_or_default(),
+            function_params: self.debug_current_params.clone(),
+            variables: self.env.all_variables(),
+            call_stack: self.debug_call_stack.clone(),
+            file: self.debug_file.clone(),
+            source_context,
+        }
+    }
+
+    fn check_debug(&mut self, stmt: &Stmt) -> Result<(), String> {
+        if !self.debug_stepping || self.debug_handler.is_none() {
+            return Ok(());
+        }
+        // Skip function definitions — they don't execute
+        if matches!(stmt.kind, StmtKind::FnDef { .. } | StmtKind::EnumDef { .. }) {
+            return Ok(());
+        }
+        // StepOver: only pause at same or shallower call depth
+        if !self.debug_step_into && self.call_depth > self.debug_step_depth {
+            return Ok(());
+        }
+        let ctx = self.build_debug_context(stmt);
+        let handler = self.debug_handler.as_ref().expect("checked above");
+        match handler(&ctx) {
+            DebugAction::Continue => { self.debug_stepping = false; }
+            DebugAction::StepOver => {
+                self.debug_step_into = false;
+                self.debug_step_depth = self.call_depth;
+            }
+            DebugAction::StepInto => {
+                self.debug_step_into = true;
+            }
+            DebugAction::Quit => { return Err("Debugger: execution stopped".to_string()); }
+        }
+        Ok(())
+    }
+
+    /// Called by the `debugger()` builtin to pause execution.
+    pub(crate) fn trigger_debugger(&mut self) -> Result<(), String> {
+        if let Some(handler) = &self.debug_handler {
+            // Find the debugger() call in source
+            let (line, column) = if let Some(pos) = self.debug_source.find("debugger()") {
+                Self::offset_to_line_col(&self.debug_source, pos)
+            } else {
+                (0, 0)
+            };
+            let source_context = if line > 0 {
+                Self::source_context_lines(&self.debug_source, line)
+            } else {
+                Vec::new()
+            };
+            let ctx = DebugContext {
+                line,
+                column,
+                statement: "debugger()".to_string(),
+                function_name: self.debug_call_stack.last().cloned().unwrap_or_default(),
+                function_params: self.debug_current_params.clone(),
+                variables: self.env.all_variables(),
+                call_stack: self.debug_call_stack.clone(),
+                file: self.debug_file.clone(),
+                source_context,
+            };
+            match handler(&ctx) {
+                DebugAction::Continue => { self.debug_stepping = false; }
+                DebugAction::StepOver => {
+                    self.debug_stepping = true;
+                    self.debug_step_into = false;
+                    self.debug_step_depth = self.call_depth;
+                }
+                DebugAction::StepInto => {
+                    self.debug_stepping = true;
+                    self.debug_step_into = true;
+                }
+                DebugAction::Quit => { return Err("Debugger: execution stopped".to_string()); }
+            }
+        }
+        Ok(())
+    }
+
     fn exec_stmt(&mut self, stmt: &Stmt) -> Result<FlowSignal, String> {
         // Check for cancellation (Ctrl+C)
         if self.cancel_flag.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
             return Err("Cancelled".to_string());
         }
+        // Debug stepping hook
+        self.check_debug(stmt)?;
         match &stmt.kind {
             StmtKind::Assign { name, error_tolerant, type_ann, is_dyn, expr } => {
                 self.exec_assign(name, *error_tolerant, type_ann.as_ref(), *is_dyn, expr)
@@ -1134,6 +1358,14 @@ impl Interpreter {
             return Some(Err(format!("maximum recursion depth exceeded (limit: {})", self.max_call_depth)));
         }
 
+        // Debug: track call stack and params
+        if self.debug_handler.is_some() {
+            self.debug_call_stack.push(name.to_string());
+            self.debug_current_params = func.params.iter().zip(args.iter())
+                .map(|((pname, _, _), val)| (pname.clone(), val.to_string()))
+                .collect();
+        }
+
         let required_count = func.params.len();
         let optional_count = func.optional_params.len();
         let total_count = required_count + optional_count;
@@ -1215,6 +1447,7 @@ impl Interpreter {
                 Err(e) => {
                     self.call_depth -= 1;
                     self.env.pop_scope();
+                    if self.debug_handler.is_some() { self.debug_call_stack.pop(); }
                     return Some(Err(e));
                 }
             }
@@ -1282,6 +1515,7 @@ impl Interpreter {
             }
         }
 
+        if self.debug_handler.is_some() { self.debug_call_stack.pop(); }
         Some(Ok(return_val))
     }
 

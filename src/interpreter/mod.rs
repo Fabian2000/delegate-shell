@@ -1,5 +1,5 @@
 pub mod value;
 pub(crate) mod env;
-mod engine;
+pub mod engine;
 
 pub use engine::Interpreter;

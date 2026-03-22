@@ -58,6 +58,10 @@ fn main() {
 
     let mut engine = make_engine(&raw_args);
     engine.cancel_flag = Some(&CANCELLED);
+    // Set debug file name if running a file (not -c)
+    if args[1] != "-c" && args[1] != "-e" {
+        engine.set_debug_file(&args[1]);
+    }
     if let Err(e) = engine.run_source(&source) {
         if let Some(code_str) = e.strip_prefix("\x00EXIT\x00") {
             let code: i32 = code_str.parse().unwrap_or(1);
@@ -73,7 +77,67 @@ fn make_engine(raw_args: &[String]) -> Interpreter {
         eprintln!("Failed to initialize: {e}");
         std::process::exit(1);
     });
-    if raw_args.iter().any(|a| a == "--vm") {
+    let is_debug = raw_args.iter().any(|a| a == "--debug");
+    if is_debug {
+        // Debug mode forces tree-walking for full stepping support
+        let _ = engine.set_execution_mode(delegate_shell::ExecutionMode::TreeWalk);
+        let highlighter = shell::highlight::DgshHighlighter::new(engine.builtin_names());
+        engine.on_debug(move |ctx| {
+            use delegate_shell::DebugAction;
+            // File header
+            let fn_info = if ctx.function_name.is_empty() {
+                String::new()
+            } else {
+                let params: String = ctx.function_params.iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(" > {}({})", ctx.function_name, params)
+            };
+            let header = format!("file {}:{}{}", ctx.file, ctx.line, fn_info);
+            let separator = "-".repeat(header.len().max(40));
+            eprintln!("\n\x1b[1;33m{header}\x1b[0m");
+            eprintln!("\x1b[90m{separator}\x1b[0m");
+            // Source lines with syntax highlighting
+            if !ctx.source_context.is_empty() {
+                let max_num = ctx.source_context.last().map(|(n, _, _)| *n).unwrap_or(0);
+                let width = format!("{max_num}").len();
+                for (line_num, content, is_current) in &ctx.source_context {
+                    if *is_current {
+                        // Yellow background with highlighted code
+                        let highlighted = highlighter.highlight_line(content);
+                        eprintln!("\x1b[43;30m {line_num:>width$} | {content:<60}\x1b[0m");
+                        let _ = highlighted; // TODO: use highlighted within background color
+                    } else {
+                        let highlighted = highlighter.highlight_line(content);
+                        eprintln!(" \x1b[90m{line_num:>width$} |\x1b[0m {highlighted}");
+                    }
+                }
+            }
+            eprintln!("\x1b[90m{separator}\x1b[0m");
+            // Call stack
+            if !ctx.call_stack.is_empty() {
+                eprintln!("\x1b[90mstack: {}\x1b[0m", ctx.call_stack.join(" > "));
+            }
+            // Variables
+            if !ctx.variables.is_empty() {
+                for (name, val, type_name) in &ctx.variables {
+                    eprintln!("\x1b[36m{name}\x1b[0m: \x1b[90m{type_name}\x1b[0m = {val}");
+                }
+            }
+            // Single-key input (raw mode)
+            eprint!("\n\x1b[32m[n]ext [s]tep-into [c]ontinue [q]uit\x1b[0m ");
+            let _ = io::stderr().flush();
+            let key = read_debug_key();
+            eprintln!();
+            match key {
+                b'c' => DebugAction::Continue,
+                b's' => DebugAction::StepInto,
+                b'q' => DebugAction::Quit,
+                _ => DebugAction::StepOver, // n, Enter, anything else = next
+            }
+        });
+    } else if raw_args.iter().any(|a| a == "--vm") {
         let _ = engine.set_execution_mode(delegate_shell::ExecutionMode::Vm);
     } else if raw_args.iter().any(|a| a == "--jit") {
         let _ = engine.set_execution_mode(delegate_shell::ExecutionMode::Jit);
@@ -81,6 +145,30 @@ fn make_engine(raw_args: &[String]) -> Interpreter {
         let _ = engine.set_execution_mode(delegate_shell::ExecutionMode::TreeWalk);
     }
     engine
+}
+
+/// Read a single key from stdin without waiting for Enter.
+fn read_debug_key() -> u8 {
+    use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+    use crossterm::terminal;
+
+    let _ = terminal::enable_raw_mode();
+    let key = loop {
+        if let Ok(Event::Key(key_event)) = event::read() {
+            // Ctrl+C = quit
+            if key_event.modifiers.contains(KeyModifiers::CONTROL) && key_event.code == KeyCode::Char('c') {
+                break b'q';
+            }
+            match key_event.code {
+                KeyCode::Char(c) => break c as u8,
+                KeyCode::Enter => break b'n', // Enter = next
+                KeyCode::Esc => break b'q',
+                _ => {}
+            }
+        }
+    };
+    let _ = terminal::disable_raw_mode();
+    key
 }
 
 fn print_help() {

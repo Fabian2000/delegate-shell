@@ -25,7 +25,7 @@ impl DgshHighlighter {
         Self { builtins }
     }
 
-    fn highlight_line(&self, line: &str) -> String {
+    pub fn highlight_line(&self, line: &str) -> String {
         let mut result = String::with_capacity(line.len() * 2);
         let chars: Vec<char> = line.chars().collect();
         let len = chars.len();
