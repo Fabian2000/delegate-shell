@@ -240,23 +240,47 @@ impl BuiltinRegistry {
 // Build default registry with all standard builtins
 // ---------------------------------------------------------------------------
 
-pub(crate) fn build_default_registry() -> Result<BuiltinRegistry, String> {
+/// Controls which builtins are available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinAccess {
+    /// All builtins (default).
+    All,
+    /// Core only: types, strings, collections, math, threads (if allowed).
+    Core,
+    /// Nothing. Only user-registered functions available.
+    None,
+}
+
+pub(crate) fn build_registry(access: BuiltinAccess, allow_threads: bool) -> Result<BuiltinRegistry, String> {
     let mut reg = BuiltinRegistry::new();
-    super::io::register(&mut reg)?;
+
+    if access == BuiltinAccess::None {
+        return Ok(reg);
+    }
+
+    // Core: always included for Core and All
     super::types::register(&mut reg)?;
     super::strings::register(&mut reg)?;
     super::collections::register(&mut reg)?;
     super::math::register(&mut reg)?;
-    super::filesystem::register(&mut reg)?;
-    super::system::register(&mut reg)?;
-    super::fileio::register(&mut reg)?;
-    super::network::register(&mut reg)?;
-    super::hashing::register(&mut reg)?;
-    super::datetime::register(&mut reg)?;
-    super::formats::register(&mut reg)?;
-    super::terminal::register(&mut reg)?;
-    super::threads::register(&mut reg)?;
-    super::process::register(&mut reg)?;
-    super::dispatch::register(&mut reg)?;
+
+    if allow_threads {
+        super::threads::register(&mut reg)?;
+    }
+
+    if access == BuiltinAccess::All {
+        super::io::register(&mut reg)?;
+        super::filesystem::register(&mut reg)?;
+        super::system::register(&mut reg)?;
+        super::fileio::register(&mut reg)?;
+        super::network::register(&mut reg)?;
+        super::hashing::register(&mut reg)?;
+        super::datetime::register(&mut reg)?;
+        super::formats::register(&mut reg)?;
+        super::terminal::register(&mut reg)?;
+        super::process::register(&mut reg)?;
+        super::dispatch::register(&mut reg)?;
+    }
+
     Ok(reg)
 }

@@ -10,5 +10,5 @@ pub mod vm;
 // Public API
 pub use interpreter::Interpreter;
 pub use interpreter::value::Value;
-pub use builtins::registry::{Param, Type};
+pub use builtins::registry::{BuiltinAccess, Param, Type};
 pub use vm::ExecutionMode;

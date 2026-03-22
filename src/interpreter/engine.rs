@@ -22,8 +22,6 @@ pub struct Interpreter {
     has_executed: bool,
     /// When true, scripts cannot call external executables (alias, use, exe resolution)
     allow_exec: bool,
-    /// When true, standard builtins are available. When false, only user-registered functions work.
-    allow_builtins: bool,
     /// When true, network builtins (http_get, http_post, etc.) are available.
     allow_network: bool,
     /// When true, executables run interactively (stdin/stdout/stderr inherited).
@@ -45,15 +43,19 @@ enum FlowSignal {
 impl Interpreter {
     /// Create a new interpreter with all standard builtins.
     pub fn new() -> Result<Self, String> {
+        Self::with_access(crate::builtins::registry::BuiltinAccess::All)
+    }
+
+    /// Create an interpreter with a specific builtin access level.
+    pub fn with_access(access: crate::builtins::registry::BuiltinAccess) -> Result<Self, String> {
         Ok(Self {
             env: Environment::new(),
-            registry: crate::builtins::registry::build_default_registry()?,
+            registry: crate::builtins::registry::build_registry(access, true)?,
             send_value: None,
             cancel_flag: None,
             execution_mode: crate::vm::ExecutionMode::Auto,
             has_executed: false,
             allow_exec: true,
-            allow_builtins: true,
             allow_network: true,
             interactive: false,
             call_depth: 0,
@@ -61,18 +63,17 @@ impl Interpreter {
         })
     }
 
+    /// Create an interpreter with core builtins and no threading.
+    pub fn sandboxed() -> Result<Self, String> {
+        let mut interp = Self::with_access(crate::builtins::registry::BuiltinAccess::Core)?;
+        interp.allow_exec = false;
+        interp.allow_network = false;
+        Ok(interp)
+    }
+
     /// Disable external executable access. Scripts cannot call system commands.
     pub fn set_allow_exec(&mut self, allow: bool) {
         self.allow_exec = allow;
-    }
-
-    /// Disable standard builtins. Only user-registered functions are available.
-    /// Call this BEFORE run_source/run_file.
-    pub fn set_allow_builtins(&mut self, allow: bool) {
-        self.allow_builtins = allow;
-        if !allow {
-            self.registry = crate::builtins::registry::BuiltinRegistry::empty();
-        }
     }
 
     /// Disable network builtins (http_get, http_post, download, etc.).
@@ -83,11 +84,6 @@ impl Interpreter {
     /// Whether external exec is allowed.
     pub fn allow_exec(&self) -> bool {
         self.allow_exec
-    }
-
-    /// Whether builtins are allowed.
-    pub fn allow_builtins(&self) -> bool {
-        self.allow_builtins
     }
 
     /// Set interactive mode for executables (stdin/stdout/stderr inherited).
@@ -1052,10 +1048,9 @@ impl Interpreter {
         if let Some(result) = self.call_user_fn(lower, args.clone()) {
             return result;
         }
-        if self.allow_builtins
-            && let Some(result) = self.call_builtin(lower, &args) {
-                return result;
-            }
+        if let Some(result) = self.call_builtin(lower, &args) {
+            return result;
+        }
         Err(format!("Undefined function: '{name}'"))
     }
 
@@ -1098,10 +1093,9 @@ impl Interpreter {
                 if let Some(result) = self.call_user_fn(lower, args.clone()) {
                     return result;
                 }
-                if self.allow_builtins
-                    && let Some(result) = self.call_builtin(lower, &args) {
-                        return result;
-                    }
+                if let Some(result) = self.call_builtin(lower, &args) {
+                    return result;
+                }
                 Err(format!("Undefined: '{name}' (not found as exe, function, or built-in)"))
             }
             Resolution::OwnFirst => {
@@ -1109,18 +1103,16 @@ impl Interpreter {
                 if let Some(result) = self.call_user_fn(lower, args.clone()) {
                     return result;
                 }
-                if self.allow_builtins
-                    && let Some(result) = self.call_builtin(lower, &args) {
-                        return result;
-                    }
+                if let Some(result) = self.call_builtin(lower, &args) {
+                    return result;
+                }
                 Err(format!("Undefined: '{name}' (not found as function or built-in)"))
             }
             Resolution::SystemOnly => {
                 // system only
-                if self.allow_builtins
-                    && let Some(result) = self.call_builtin(lower, &args) {
-                        return result;
-                    }
+                if let Some(result) = self.call_builtin(lower, &args) {
+                    return result;
+                }
                 Err(format!("Undefined: '{name}' (not a built-in function)"))
             }
         }
