@@ -198,9 +198,36 @@ fn register_shell_builtins(engine: &mut Interpreter) {
         Type::Dyn,
         |args, interp| {
             interp.set_interactive(true);
+            crate::INTERACTIVE_CHILD.store(true, std::sync::atomic::Ordering::Relaxed);
             let result = interp.call_lambda(&args[0], vec![]);
+            crate::INTERACTIVE_CHILD.store(false, std::sync::atomic::Ordering::Relaxed);
             interp.set_interactive(false);
             result
+        },
+    );
+
+    // cd: change directory
+    let _ = engine.register(
+        "cd",
+        &[Param::Required(Type::String)],
+        Type::Void,
+        |args, _| {
+            let path = args[0].as_str_ref().ok_or("cd: expected string")?;
+            let target = if path == "~" || path == "" {
+                std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .unwrap_or_else(|_| "/".to_string())
+            } else if let Some(rest) = path.strip_prefix("~/") {
+                let home = std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .unwrap_or_else(|_| "/".to_string());
+                format!("{home}/{rest}")
+            } else {
+                path.to_string()
+            };
+            std::env::set_current_dir(&target)
+                .map_err(|e| format!("cd: {target}: {e}"))?;
+            Ok(Value::void())
         },
     );
 

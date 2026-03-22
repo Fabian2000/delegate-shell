@@ -8,6 +8,7 @@ use delegate_shell::Interpreter;
 mod shell;
 
 static CANCELLED: AtomicBool = AtomicBool::new(false);
+static INTERACTIVE_CHILD: AtomicBool = AtomicBool::new(false);
 
 fn main() {
     ctrlc_handler();
@@ -153,7 +154,11 @@ fn run_migrate(args: &[String]) {
 #[cfg(unix)]
 fn ctrlc_handler() {
     unsafe extern "C" fn handler(_sig: i32) {
-        CANCELLED.store(true, Ordering::Relaxed);
+        if !INTERACTIVE_CHILD.load(Ordering::Relaxed) {
+            CANCELLED.store(true, Ordering::Relaxed);
+        }
+        // When INTERACTIVE_CHILD is true, the child process gets SIGINT
+        // directly from the terminal — we don't cancel dgsh.
     }
     unsafe {
         let _ = signal(2, handler as *const () as usize);
@@ -169,7 +174,9 @@ unsafe extern "C" {
 fn ctrlc_handler() {
     unsafe extern "system" fn handler(ctrl_type: u32) -> i32 {
         if ctrl_type == 0 || ctrl_type == 1 {
-            CANCELLED.store(true, Ordering::Relaxed);
+            if !INTERACTIVE_CHILD.load(Ordering::Relaxed) {
+                CANCELLED.store(true, Ordering::Relaxed);
+            }
             1
         } else {
             0
