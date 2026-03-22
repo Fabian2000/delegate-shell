@@ -133,6 +133,17 @@ impl BuiltinRegistry {
         Ok(())
     }
 
+    pub fn register_override(
+        &mut self,
+        name: &str,
+        params: &'static [Param],
+        returns: Type,
+        f: impl Fn(&[Value], &mut Interpreter) -> Result<Value, String> + 'static,
+    ) -> Result<(), String> {
+        self.defs.insert(name.to_owned(), Entry { params, returns, handler: std::rc::Rc::new(f) });
+        Ok(())
+    }
+
     /// Internal: register a pure builtin (no interpreter access needed).
     pub(crate) fn add(
         &mut self,

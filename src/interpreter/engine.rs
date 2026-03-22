@@ -124,6 +124,17 @@ impl Interpreter {
         self.registry.register(name, params, returns, f)
     }
 
+    /// Register a custom builtin, replacing any existing one with the same name.
+    pub fn register_override(
+        &mut self,
+        name: &str,
+        params: &'static [crate::builtins::registry::Param],
+        returns: crate::builtins::registry::Type,
+        f: impl Fn(&[Value], &mut Interpreter) -> Result<Value, String> + 'static,
+    ) -> Result<(), String> {
+        self.registry.register_override(name, params, returns, f)
+    }
+
     /// Get all registered builtin function names (for tab-completion etc.)
     pub fn builtin_names(&self) -> Vec<String> {
         self.registry.names()

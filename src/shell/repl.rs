@@ -188,6 +188,7 @@ fn history_file() -> Option<String> {
 }
 
 fn register_shell_builtins(engine: &mut Interpreter) {
+    use std::io::Write;
     use delegate_shell::builtins::registry::{Param, Type};
     use delegate_shell::interpreter::value::Value;
 
@@ -200,6 +201,22 @@ fn register_shell_builtins(engine: &mut Interpreter) {
             let result = interp.call_lambda(&args[0], vec![]);
             interp.set_interactive(false);
             result
+        },
+    );
+
+    // REPL: print() adds newline if missing (like Python's interactive mode)
+    let _ = engine.register_override(
+        "print",
+        &[Param::Required(Type::String)],
+        Type::Void,
+        |args, _| {
+            let s = args[0].to_string();
+            print!("{s}");
+            if !s.ends_with('\n') {
+                println!();
+            }
+            let _ = std::io::stdout().flush();
+            Ok(Value::void())
         },
     );
 }
