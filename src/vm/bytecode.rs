@@ -167,6 +167,12 @@ pub struct ConstantPool {
     index: HashMap<String, u16>,
 }
 
+impl Default for ConstantPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConstantPool {
     pub fn new() -> Self {
         Self { strings: Vec::new(), index: HashMap::new() }

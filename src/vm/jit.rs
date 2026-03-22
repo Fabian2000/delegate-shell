@@ -488,10 +488,7 @@ unsafe extern "C" fn jit_call_builtin_v2(
             .collect();
 
         // Temporarily take registry out to avoid borrow conflicts
-        let reg = std::mem::replace(
-            &mut interp.registry,
-            crate::builtins::registry::BuiltinRegistry::new(),
-        );
+        let reg = std::mem::take(&mut interp.registry);
         let result = reg.call(&name, &args, interp);
         interp.registry = reg;
 
@@ -727,10 +724,10 @@ unsafe extern "C" fn jit_free_global(idx: u64) {
 }
 
 /// Throw (returns void; actual error handling is TODO)
-unsafe extern "C" fn jit_recursion_overflow() {
+unsafe extern "C" fn jit_recursion_overflow() { unsafe {
     let vm = &mut *get_jit_vm();
     vm.last_error = Some("maximum recursion depth exceeded (limit: 10000)".to_string());
-}
+}}
 
 unsafe extern "C" fn jit_throw(val: u64) -> u64 {
     {
@@ -802,7 +799,7 @@ unsafe extern "C" fn jit_optional_check(slot: u64) -> u64 {
 unsafe extern "C" fn jit_get_dollar_index(idx: u64) -> u64 {
     unsafe {
         let vm = &*get_jit_vm();
-        let result = vm.get_dollar_index(idx as usize).unwrap_or_else(|| Value::void());
+        let result = vm.get_dollar_index(idx as usize).unwrap_or_else(Value::void);
         let raw = result.raw();
         std::mem::forget(result);
         raw
@@ -818,7 +815,7 @@ unsafe extern "C" fn jit_get_dollar_field(
         let chunks = &*get_jit_chunks();
         let chunk_idx = get_jit_chunk_idx();
         let field = chunks[chunk_idx].constants.get(field_idx as u16).clone();
-        let result = vm.get_dollar_field(&field).unwrap_or_else(|| Value::void());
+        let result = vm.get_dollar_field(&field).unwrap_or_else(Value::void);
         let raw = result.raw();
         std::mem::forget(result);
         raw
@@ -829,7 +826,7 @@ unsafe extern "C" fn jit_get_dollar_field(
 unsafe extern "C" fn jit_get_dollar() -> u64 {
     unsafe {
         let vm = &*get_jit_vm();
-        let result = vm.get_dollar().unwrap_or_else(|| Value::void());
+        let result = vm.get_dollar().unwrap_or_else(Value::void);
         let raw = result.raw();
         std::mem::forget(result);
         raw
@@ -1116,10 +1113,7 @@ impl JitManager {
         let self_ref = module.declare_func_in_func(func_id, &mut func);
 
         // Declare and import all helper function references
-        let helpers = match HelperRefs::declare(module, &mut func) {
-            Some(h) => h,
-            None => return None,
-        };
+        let helpers = HelperRefs::declare(module, &mut func)?;
 
         let mut builder = FunctionBuilder::new(&mut func, &mut self.builder_ctx);
         let ok = GenericJitCompiler::compile(&mut builder, chunk, self_ref, &helpers, chunk_idx);
@@ -1139,6 +1133,10 @@ impl JitManager {
 
     /// Call a JIT'd function. Context is set via thread-locals before calling.
     /// `args` contains the actual function arguments (1..=8). Depth is appended automatically.
+    ///
+    /// # Safety
+    /// `ptr` must be a valid function pointer returned by `check_and_compile`.
+    /// Thread-local JIT context must be set via `set_jit_context` before calling.
     pub unsafe fn call_jit_fn(&self, ptr: *const u8, args: &[u64], depth: u64) -> u64 {
         unsafe {
             match args.len() {
@@ -1179,7 +1177,8 @@ impl JitManager {
         }
     }
 
-    // Keep old API for backward compatibility
+    /// # Safety
+    /// `ptr` must be a valid JIT-compiled function pointer.
     pub unsafe fn call_int_fn(&self, ptr: *const u8, arg: i64) -> i64 {
         unsafe {
             let func: unsafe extern "C" fn(i64) -> i64 = std::mem::transmute(ptr);
@@ -1187,6 +1186,8 @@ impl JitManager {
         }
     }
 
+    /// # Safety
+    /// `ptr` must be a valid JIT-compiled function pointer.
     pub unsafe fn call_int_fn2(&self, ptr: *const u8, a: i64, b: i64) -> i64 {
         unsafe {
             let func: unsafe extern "C" fn(i64, i64) -> i64 = std::mem::transmute(ptr);
@@ -1575,9 +1576,9 @@ impl GenericJitCompiler {
         }
 
         // Init params (no offset — context is in thread-locals)
-        for i in 0..chunk.param_count as usize {
+        for (i, var) in vars.iter().take(chunk.param_count as usize).enumerate() {
             let param_val = builder.block_params(entry)[i];
-            builder.def_var(vars[i], param_val);
+            builder.def_var(*var, param_val);
         }
         // Depth counter is last param
         let depth_var = Variable::from_u32(max_locals as u32);
@@ -1612,8 +1613,8 @@ impl GenericJitCompiler {
         // Initialize remaining locals to void
         let void_raw = Value::void().raw();
         let void_const = builder.ins().iconst(types::I64, void_raw as i64);
-        for i in chunk.param_count as usize..max_locals {
-            builder.def_var(vars[i], void_const);
+        for var in &vars[chunk.param_count as usize..max_locals] {
+            builder.def_var(*var, void_const);
         }
 
         // Seal entry block
@@ -2495,7 +2496,7 @@ impl GenericJitCompiler {
         }
 
         // Seal all blocks
-        for (_, &block) in &block_map {
+        for &block in block_map.values() {
             if !block_sealed.contains(&block) {
                 builder.seal_block(block);
             }

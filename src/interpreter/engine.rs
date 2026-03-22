@@ -404,11 +404,10 @@ impl Interpreter {
         if error_tolerant {
             match result {
                 Ok(val) => {
-                    if !is_dyn {
-                        if let Some(ann) = type_ann {
+                    if !is_dyn
+                        && let Some(ann) = type_ann {
                             check_type_annotation(ann, &val, name)?;
                         }
-                    }
                     self.env.set_dyn(name, MaybeError::Ok(val), is_dyn)?;
                 }
                 Err(msg) if msg.starts_with("\x00FATAL\x00") => {
@@ -421,11 +420,10 @@ impl Interpreter {
                 Ok(v) => v,
                 Err(msg) => return Err(msg.trim_start_matches("\x00FATAL\x00").to_string()),
             };
-            if !is_dyn {
-                if let Some(ann) = type_ann {
+            if !is_dyn
+                && let Some(ann) = type_ann {
                     check_type_annotation(ann, &val, name)?;
                 }
-            }
             self.env.set_dyn(name, MaybeError::Ok(val), is_dyn)?;
         }
         Ok(FlowSignal::None)
@@ -434,15 +432,14 @@ impl Interpreter {
     fn exec_compound_assign(&mut self, name: &str, op: CompoundOp, expr: &Expr) -> Result<FlowSignal, String> {
         // Fast path: atomic int += int (lock-free)
         if op == CompoundOp::Add {
-            let is_atomic = self.env.get(name).map_or(false, |v| matches!(v, MaybeError::Ok(v) if v.is_atomic()));
+            let is_atomic = self.env.get(name).is_some_and(|v| matches!(v, MaybeError::Ok(v) if v.is_atomic()));
             if is_atomic {
                 let rhs = self.eval_expr(expr)?;
-                if let (Some(MaybeError::Ok(current)), Some(b)) = (self.env.get(name), rhs.as_int()) {
-                    if let Some(a) = current.as_atomic() {
+                if let (Some(MaybeError::Ok(current)), Some(b)) = (self.env.get(name), rhs.as_int())
+                    && let Some(a) = current.as_atomic() {
                         let _ = a.fetch_add(b);
                         return Ok(FlowSignal::None);
                     }
-                }
             }
         }
         // Fast path: int += int, string += string (very common in loops)
@@ -466,21 +463,19 @@ impl Interpreter {
                 Some((false, _, _)) => {
                     // String += string: try in-place append
                     let rhs_str = rhs.as_str_ref().unwrap_or("").to_string();
-                    if let Some(MaybeError::Ok(current_val)) = self.env.get_mut(name) {
-                        if current_val.try_string_append_in_place(&rhs_str) {
+                    if let Some(MaybeError::Ok(current_val)) = self.env.get_mut(name)
+                        && current_val.try_string_append_in_place(&rhs_str) {
                             return Ok(FlowSignal::None);
                         }
-                    }
                     // Fallback: allocate new string
-                    if let Some(MaybeError::Ok(current_val)) = self.env.get(name) {
-                        if let Some(a_str) = current_val.as_str_ref() {
+                    if let Some(MaybeError::Ok(current_val)) = self.env.get(name)
+                        && let Some(a_str) = current_val.as_str_ref() {
                             let mut new_s = String::with_capacity(a_str.len() + rhs_str.len());
                             new_s.push_str(a_str);
                             new_s.push_str(&rhs_str);
                             self.env.set(name, MaybeError::Ok(Value::string_owned(new_s)))?;
                             return Ok(FlowSignal::None);
                         }
-                    }
                     return Ok(FlowSignal::None);
                 }
                 None => {}
@@ -1033,11 +1028,10 @@ impl Interpreter {
         if let Some(result) = self.call_user_fn(lower, args.clone()) {
             return result;
         }
-        if self.allow_builtins {
-            if let Some(result) = self.call_builtin(lower, &args) {
+        if self.allow_builtins
+            && let Some(result) = self.call_builtin(lower, &args) {
                 return result;
             }
-        }
         Err(format!("Undefined function: '{name}'"))
     }
 
@@ -1047,8 +1041,8 @@ impl Interpreter {
         let lower = lower_cow.as_ref();
 
         // Check if name is a variable holding a lambda
-        if let Some(MaybeError::Ok(val)) = self.env.get(lower) {
-            if let Some(data) = val.as_lambda() {
+        if let Some(MaybeError::Ok(val)) = self.env.get(lower)
+            && let Some(data) = val.as_lambda() {
                 let data = data.clone();
                 if !data.bound_args.is_empty() && !args.is_empty() {
                     return Err(format!("Lambda '{name}' already has bound args, cannot pass additional args"));
@@ -1061,7 +1055,6 @@ impl Interpreter {
                 };
                 return self.call_resolved(&data.name, lambda_resolution, call_args);
             }
-        }
 
         match resolution {
             Resolution::Normal => {
@@ -1080,11 +1073,10 @@ impl Interpreter {
                 if let Some(result) = self.call_user_fn(lower, args.clone()) {
                     return result;
                 }
-                if self.allow_builtins {
-                    if let Some(result) = self.call_builtin(lower, &args) {
+                if self.allow_builtins
+                    && let Some(result) = self.call_builtin(lower, &args) {
                         return result;
                     }
-                }
                 Err(format!("Undefined: '{name}' (not found as exe, function, or built-in)"))
             }
             Resolution::OwnFirst => {
@@ -1092,20 +1084,18 @@ impl Interpreter {
                 if let Some(result) = self.call_user_fn(lower, args.clone()) {
                     return result;
                 }
-                if self.allow_builtins {
-                    if let Some(result) = self.call_builtin(lower, &args) {
+                if self.allow_builtins
+                    && let Some(result) = self.call_builtin(lower, &args) {
                         return result;
                     }
-                }
                 Err(format!("Undefined: '{name}' (not found as function or built-in)"))
             }
             Resolution::SystemOnly => {
                 // system only
-                if self.allow_builtins {
-                    if let Some(result) = self.call_builtin(lower, &args) {
+                if self.allow_builtins
+                    && let Some(result) = self.call_builtin(lower, &args) {
                         return result;
                     }
-                }
                 Err(format!("Undefined: '{name}' (not a built-in function)"))
             }
         }
@@ -1144,8 +1134,8 @@ impl Interpreter {
                         self.env.pop_scope();
                         return Some(Err(e));
                     }
-                } else if let Some(inferred) = func.inferred_types.get(param) {
-                    if let Err(_) = check_type_annotation(inferred, val, param) {
+                } else if let Some(inferred) = func.inferred_types.get(param)
+                    && check_type_annotation(inferred, val, param).is_err() {
                         let source = if func.body_inferred_params.contains(param) {
                             "inferred from body"
                         } else {
@@ -1157,7 +1147,6 @@ impl Interpreter {
                             param, name, source, inferred.type_name(), val.type_name()
                         )));
                     }
-                }
             }
             self.env.set_local(param, MaybeError::Ok(val.clone()));
         }
@@ -1170,8 +1159,8 @@ impl Interpreter {
                         self.env.pop_scope();
                         return Some(Err(e));
                     }
-                } else if let Some(inferred) = func.inferred_types.get(opt_param) {
-                    if let Err(_) = check_type_annotation(inferred, &val, opt_param) {
+                } else if let Some(inferred) = func.inferred_types.get(opt_param)
+                    && check_type_annotation(inferred, &val, opt_param).is_err() {
                         let source = if func.body_inferred_params.contains(opt_param) {
                             "inferred from body"
                         } else {
@@ -1183,7 +1172,6 @@ impl Interpreter {
                             opt_param, name, source, inferred.type_name(), val.type_name()
                         )));
                     }
-                }
             }
             self.env.set_local(opt_param, MaybeError::Ok(val));
         }
@@ -1257,14 +1245,13 @@ impl Interpreter {
                     if *is_dyn || ann.is_some() || live_func.inferred_types.contains_key(param) {
                         continue;
                     }
-                    if let Some(val) = args.get(required_count + i) {
-                        if !val.is_void() {
+                    if let Some(val) = args.get(required_count + i)
+                        && !val.is_void() {
                             live_func.inferred_types.insert(
                                 param.clone(),
                                 TypeAnnotation::Simple(val.type_name().to_string()),
                             );
                         }
-                    }
                 }
             }
         }
@@ -1524,9 +1511,8 @@ fn body_has_dyn_return(stmts: &[Stmt]) -> bool {
             StmtKind::Return { is_dyn: true, .. } => return true,
             StmtKind::If { body, else_body, .. } => {
                 if body_has_dyn_return(body) { return true; }
-                if let Some(eb) = else_body {
-                    if body_has_dyn_return(eb) { return true; }
-                }
+                if let Some(eb) = else_body
+                    && body_has_dyn_return(eb) { return true; }
             }
             StmtKind::While { body, .. } | StmtKind::For { body, .. } => {
                 if body_has_dyn_return(body) { return true; }
@@ -1621,21 +1607,20 @@ fn walk_expr_for_inference(
             // Check builtin signatures
             if let Some(params) = reg.params(name) {
                 for (i, arg) in args.iter().enumerate() {
-                    if let ExprKind::Ident(ident) = &arg.kind {
-                        if i < params.len() && candidates.contains(ident) && !inferred.contains_key(ident) {
+                    if let ExprKind::Ident(ident) = &arg.kind
+                        && i < params.len() && candidates.contains(ident) && !inferred.contains_key(ident) {
                             let ty = params[i].param_type();
                             if ty != crate::builtins::registry::Type::Dyn {
                                 inferred.insert(ident.clone(), TypeAnnotation::Simple(ty.name().to_string()));
                             }
                         }
-                    }
                     walk_expr_for_inference(arg, candidates, inferred, env, reg);
                 }
             } else if let Some(user_fn) = env.get_fn(name) {
                 let all_params: Vec<_> = user_fn.params.iter().chain(user_fn.optional_params.iter()).collect();
                 for (i, arg) in args.iter().enumerate() {
-                    if let ExprKind::Ident(ident) = &arg.kind {
-                        if i < all_params.len() && candidates.contains(ident) && !inferred.contains_key(ident) {
+                    if let ExprKind::Ident(ident) = &arg.kind
+                        && i < all_params.len() && candidates.contains(ident) && !inferred.contains_key(ident) {
                             let (_, ann, _) = all_params[i];
                             if let Some(ann) = ann {
                                 inferred.insert(ident.clone(), ann.clone());
@@ -1643,7 +1628,6 @@ fn walk_expr_for_inference(
                                 inferred.insert(ident.clone(), inf.clone());
                             }
                         }
-                    }
                     walk_expr_for_inference(arg, candidates, inferred, env, reg);
                 }
             } else {

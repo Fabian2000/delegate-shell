@@ -96,12 +96,11 @@ impl Environment {
         for scope in self.scopes.iter_mut().rev() {
             if let Some(slot) = scope.get_mut(key.as_ref()) {
                 // If existing is Atomic, store into it instead of replacing
-                if let (MaybeError::Ok(existing), MaybeError::Ok(new_val)) = (&slot, &value) {
-                    if let Some(a) = existing.as_atomic() {
+                if let (MaybeError::Ok(existing), MaybeError::Ok(new_val)) = (&slot, &value)
+                    && let Some(a) = existing.as_atomic() {
                         a.store(new_val);
                         return Ok(());
                     }
-                }
                 // Type check: existing Ok value must match new Ok value's type
                 if let (MaybeError::Ok(existing), MaybeError::Ok(new_val)) = (&slot, &value) {
                     let old_type = existing.type_name();
@@ -113,7 +112,7 @@ impl Environment {
                     }
                     // Structural check for objects: same fields with same types
                     if let (Some(old_ref), Some(new_ref)) = (existing.as_object_ref(), new_val.as_object_ref()) {
-                        check_object_structure(name, &*old_ref.borrow(), &*new_ref.borrow())?;
+                        check_object_structure(name, &old_ref.borrow(), &new_ref.borrow())?;
                     }
                 }
                 *slot = value;
@@ -241,7 +240,7 @@ fn check_object_structure(
         }
         // Recursive check for nested objects
         if let (Some(old_ref), Some(new_ref)) = (old_val.as_object_ref(), new_val.as_object_ref()) {
-            check_object_structure(&format!("{var_name}.{key}"), &*old_ref.borrow(), &*new_ref.borrow())?;
+            check_object_structure(&format!("{var_name}.{key}"), &old_ref.borrow(), &new_ref.borrow())?;
         }
     }
     Ok(())

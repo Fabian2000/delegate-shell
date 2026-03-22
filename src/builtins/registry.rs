@@ -88,14 +88,22 @@ impl Param {
 // Registry
 // ---------------------------------------------------------------------------
 
+type BuiltinHandler = std::rc::Rc<dyn Fn(&[Value], &mut Interpreter) -> Result<Value, String>>;
+
 struct Entry {
     params: &'static [Param],
     returns: Type,
-    handler: std::rc::Rc<dyn Fn(&[Value], &mut Interpreter) -> Result<Value, String>>,
+    handler: BuiltinHandler,
 }
 
 pub struct BuiltinRegistry {
     defs: HashMap<String, Entry>,
+}
+
+impl Default for BuiltinRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BuiltinRegistry {
@@ -168,7 +176,7 @@ impl BuiltinRegistry {
         &self,
         name: &str,
         args: &[Value],
-    ) -> Option<Result<std::rc::Rc<dyn Fn(&[Value], &mut Interpreter) -> Result<Value, String>>, String>> {
+    ) -> Option<Result<BuiltinHandler, String>> {
         let entry = self.defs.get(name)?;
 
         // Validate argument count

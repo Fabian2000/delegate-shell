@@ -73,13 +73,11 @@ fn builtin_get_process_by_name(args: &[Value]) -> Result<Value, String> {
     for proc in list.iter() {
         if let Some(rc) = proc.as_object_ref() {
             let fields = rc.borrow();
-            if let Some(name_val) = fields.fields.get("name") {
-                if let Some(name) = name_val.as_str_ref() {
-                    if name.to_ascii_lowercase().contains(&search) {
+            if let Some(name_val) = fields.fields.get("name")
+                && let Some(name) = name_val.as_str_ref()
+                    && name.to_ascii_lowercase().contains(&search) {
                         results.push(proc.clone());
                     }
-                }
-            }
         }
     }
     Ok(new_list(results))
@@ -156,11 +154,10 @@ fn builtin_is_process_running(args: &[Value]) -> Result<Value, String> {
 
 fn extract_pid(val: &Value) -> Result<i64, String> {
     if let Some(rc) = val.as_object_ref() {
-        if let Some(id_val) = rc.borrow().fields.get("id").cloned() {
-            if let Some(pid) = id_val.as_int() {
+        if let Some(id_val) = rc.borrow().fields.get("id").cloned()
+            && let Some(pid) = id_val.as_int() {
                 return Ok(pid);
             }
-        }
         return Err("Process object has no 'id' field".to_string());
     }
     Err(format!("Expected process object with 'id' field, got {}", val.type_name()))

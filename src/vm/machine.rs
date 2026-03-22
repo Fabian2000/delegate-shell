@@ -44,6 +44,12 @@ pub struct VM {
     pub(crate) call_depth: usize,
 }
 
+impl Default for VM {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VM {
     pub fn new() -> Self {
         Self {
@@ -278,8 +284,8 @@ impl VM {
                         } else {
                             None
                         };
-                        if let Some(ptr) = jit_ptr {
-                            if argc >= 1 && argc <= 8 {
+                        if let Some(ptr) = jit_ptr
+                            && (1..=8).contains(&argc) {
                                 let mut raw_args = Vec::with_capacity(argc as usize);
                                 let start = self.stack.len() - argc as usize;
                                 for i in 0..argc as usize {
@@ -312,7 +318,6 @@ impl VM {
                                 self.stack.push(Value::from_raw(result_raw));
                                 continue;
                             }
-                        }
                     }
 
                     // Pad missing optional params with Void
@@ -359,66 +364,56 @@ impl VM {
                 // ============================================================
                 Op::Add => {
                     let len = self.stack.len();
-                    if len >= 2 {
-                        if let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
-                            let r = a + b;
-                            self.stack.pop();
-                            if let Some(v) = self.stack.last_mut() { *v = Value::int(r); }
-                            continue;
-                        }
-                        // String fast path: take left operand to get sole ownership for in-place append
-                        if self.stack[len-2].is_string() && self.stack[len-1].is_string() {
-                            let b = self.stack.pop().ok_or("VM: stack underflow")?;
-                            // Take the left value out, replacing with void (refcount decrements by 0)
-                            let mut a = std::mem::replace(self.stack.last_mut().ok_or("VM: stack underflow")?, Value::void());
-                            if let Some(b_str) = b.as_str_ref() {
-                                if a.try_string_append_in_place(b_str) {
-                                    *self.stack.last_mut().ok_or("VM: stack underflow")? = a;
-                                    continue;
-                                }
-                                // Fallback: allocate with capacity
-                                if let Some(a_str) = a.as_str_ref() {
-                                    let mut s = String::with_capacity(a_str.len() + b_str.len());
-                                    s.push_str(a_str);
-                                    s.push_str(b_str);
-                                    *self.stack.last_mut().ok_or("VM: stack underflow")? = Value::string_owned(s);
-                                    continue;
-                                }
-                            }
-                            // Should not reach here, but just in case
-                            *self.stack.last_mut().ok_or("VM: stack underflow")? = generic_add(a, b)?;
-                            continue;
-                        }
+                    if len >= 2 && let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
+                        let r = a + b;
+                        self.stack.pop();
+                        if let Some(v) = self.stack.last_mut() { *v = Value::int(r); }
+                        continue;
                     }
-                    self.binary_op(|a, b| generic_add(a, b))?;
+                    // String fast path: take left operand to get sole ownership for in-place append
+                    if len >= 2 && self.stack[len-2].is_string() && self.stack[len-1].is_string() {
+                        let b = self.stack.pop().ok_or("VM: stack underflow")?;
+                        let mut a = std::mem::replace(self.stack.last_mut().ok_or("VM: stack underflow")?, Value::void());
+                        if let Some(b_str) = b.as_str_ref() {
+                            if a.try_string_append_in_place(b_str) {
+                                *self.stack.last_mut().ok_or("VM: stack underflow")? = a;
+                                continue;
+                            }
+                            if let Some(a_str) = a.as_str_ref() {
+                                let mut s = String::with_capacity(a_str.len() + b_str.len());
+                                s.push_str(a_str);
+                                s.push_str(b_str);
+                                *self.stack.last_mut().ok_or("VM: stack underflow")? = Value::string_owned(s);
+                                continue;
+                            }
+                        }
+                        *self.stack.last_mut().ok_or("VM: stack underflow")? = generic_add(a, b)?;
+                        continue;
+                    }
+                    self.binary_op(generic_add)?;
                 }
                 Op::Sub => {
                     let len = self.stack.len();
-                    if len >= 2 {
-                        if let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
-                            let r = a - b;
-                            self.stack.pop();
-                            if let Some(v) = self.stack.last_mut() { *v = Value::int(r); }
-                            continue;
-                        }
+                    if len >= 2 && let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
+                        let r = a - b;
+                        self.stack.pop();
+                        if let Some(v) = self.stack.last_mut() { *v = Value::int(r); }
+                        continue;
                     }
-                    self.binary_op(|a, b| generic_sub(a, b))?;
+                    self.binary_op(generic_sub)?;
                 }
                 Op::Mul => {
                     let len = self.stack.len();
-                    if len >= 2 {
-                        if let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
-                            let r = a * b;
-                            self.stack.pop();
-                            if let Some(v) = self.stack.last_mut() { *v = Value::int(r); }
-                            continue;
-                        }
+                    if len >= 2 && let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
+                        self.stack.pop();
+                        if let Some(v) = self.stack.last_mut() { *v = Value::int(a * b); }
+                        continue;
                     }
-                    self.binary_op(|a, b| generic_mul(a, b))?;
+                    self.binary_op(generic_mul)?;
                 }
-                Op::Div => { self.binary_op(|a, b| generic_div(a, b))?; }
-                Op::Mod => { self.binary_op(|a, b| generic_mod(a, b))?; }
-                Op::Pow => { self.binary_op(|a, b| generic_pow(a, b))?; }
+                Op::Div => { self.binary_op(generic_div)?; }
+                Op::Mod => { self.binary_op(generic_mod)?; }
+                Op::Pow => { self.binary_op(generic_pow)?; }
                 Op::Neg => {
                     let val = self.stack.pop().ok_or("VM: stack underflow")?;
                     if let Some(n) = val.as_int() {
@@ -437,49 +432,37 @@ impl VM {
                 Op::Neq => { self.binary_op(|a, b| Ok(Value::bool(!values_equal(&a, &b))))?; }
                 Op::Lt => {
                     let len = self.stack.len();
-                    if len >= 2 {
-                        if let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
-                            let r = a < b;
-                            self.stack.pop();
-                            if let Some(v) = self.stack.last_mut() { *v = Value::bool(r); }
-                            continue;
-                        }
+                    if len >= 2 && let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
+                        self.stack.pop();
+                        if let Some(v) = self.stack.last_mut() { *v = Value::bool(a < b); }
+                        continue;
                     }
                     self.binary_op(|a, b| generic_compare(a, b, |o| o.is_lt()))?;
                 }
                 Op::Gt => {
                     let len = self.stack.len();
-                    if len >= 2 {
-                        if let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
-                            let r = a > b;
-                            self.stack.pop();
-                            if let Some(v) = self.stack.last_mut() { *v = Value::bool(r); }
-                            continue;
-                        }
+                    if len >= 2 && let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
+                        self.stack.pop();
+                        if let Some(v) = self.stack.last_mut() { *v = Value::bool(a > b); }
+                        continue;
                     }
                     self.binary_op(|a, b| generic_compare(a, b, |o| o.is_gt()))?;
                 }
                 Op::Lte => {
                     let len = self.stack.len();
-                    if len >= 2 {
-                        if let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
-                            let r = a <= b;
-                            self.stack.pop();
-                            if let Some(v) = self.stack.last_mut() { *v = Value::bool(r); }
-                            continue;
-                        }
+                    if len >= 2 && let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
+                        self.stack.pop();
+                        if let Some(v) = self.stack.last_mut() { *v = Value::bool(a <= b); }
+                        continue;
                     }
                     self.binary_op(|a, b| generic_compare(a, b, |o| o.is_le()))?;
                 }
                 Op::Gte => {
                     let len = self.stack.len();
-                    if len >= 2 {
-                        if let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
-                            let r = a >= b;
-                            self.stack.pop();
-                            if let Some(v) = self.stack.last_mut() { *v = Value::bool(r); }
-                            continue;
-                        }
+                    if len >= 2 && let (Some(a), Some(b)) = (self.stack[len-2].as_int(), self.stack[len-1].as_int()) {
+                        self.stack.pop();
+                        if let Some(v) = self.stack.last_mut() { *v = Value::bool(a >= b); }
+                        continue;
                     }
                     self.binary_op(|a, b| generic_compare(a, b, |o| o.is_ge()))?;
                 }
@@ -536,8 +519,8 @@ impl VM {
                     let rhs = self.stack.pop().ok_or("VM: stack underflow")?;
                     let idx = base!() + slot;
                     // String + String fast path: take value from slot for sole ownership
-                    if self.stack[idx].is_string() && rhs.is_string() {
-                        if let Some(rhs_str) = rhs.as_str_ref() {
+                    if self.stack[idx].is_string() && rhs.is_string()
+                        && let Some(rhs_str) = rhs.as_str_ref() {
                             // Take value out of local slot to get refcount 1
                             let mut local_val = std::mem::replace(&mut self.stack[idx], Value::void());
                             if local_val.try_string_append_in_place(rhs_str) {
@@ -555,7 +538,6 @@ impl VM {
                             // Put it back if somehow not a string
                             self.stack[idx] = local_val;
                         }
-                    }
                     // Fallback: int + int or other type combinations
                     if let (Some(a), Some(b)) = (self.stack[idx].as_int(), rhs.as_int()) {
                         self.stack[idx] = Value::int(a + b);
@@ -713,8 +695,8 @@ impl VM {
                         .and_then(|&slot| self.globals.get(slot as usize))
                         .filter(|v| !v.is_void())
                         .cloned();
-                    if let Some(val) = global_val {
-                        if let Some(data) = val.as_lambda() {
+                    if let Some(val) = global_val
+                        && let Some(data) = val.as_lambda() {
                             let arg_start = self.stack.len() - argc as usize;
                             let call_args: Vec<Value> = if data.bound_args.is_empty() {
                                 self.stack.drain(arg_start..).collect()
@@ -743,7 +725,6 @@ impl VM {
                             }
                             continue;
                         }
-                    }
 
                     // Try fn_table (user function)
                     if let Some(&fn_chunk) = self.fn_table.get(name.as_ref()) {
@@ -925,11 +906,10 @@ impl VM {
                     self.stack.push(val);
                 }
                 Op::CheckCancel => {
-                    if let Some(flag) = interp.cancel_flag {
-                        if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let Some(flag) = interp.cancel_flag
+                        && flag.load(std::sync::atomic::Ordering::Relaxed) {
                             return Err("Cancelled".to_string());
                         }
-                    }
                 }
 
                 // ============================================================
@@ -960,24 +940,22 @@ impl VM {
                     let imm = read_i64!();
                     let offset = read_i32!();
                     let idx = base!() + slot;
-                    if let Some(n) = self.stack[idx].as_int() {
-                        if n > imm {
+                    if let Some(n) = self.stack[idx].as_int()
+                        && n > imm {
                             let cur_ip = ip!();
                             self.frames[frame_idx].ip = (cur_ip as i32 + offset) as usize;
                         }
-                    }
                 }
                 Op::BranchIfLocalLteImm => {
                     let slot = read_u16!() as usize;
                     let imm = read_i64!();
                     let offset = read_i32!();
                     let idx = base!() + slot;
-                    if let Some(n) = self.stack[idx].as_int() {
-                        if n <= imm {
+                    if let Some(n) = self.stack[idx].as_int()
+                        && n <= imm {
                             let cur_ip = ip!();
                             self.frames[frame_idx].ip = (cur_ip as i32 + offset) as usize;
                         }
-                    }
                 }
                 Op::GetLocalInt => {
                     let slot = read_u16!() as usize;
@@ -1060,7 +1038,7 @@ impl VM {
                     let slot = read_u16!();
                     let is_ok = self.ok_vars.contains(&slot) ||
                         (!self.error_vars.contains_key(&slot) &&
-                         self.globals.get(slot as usize).map_or(false, |v| !v.is_void()));
+                         self.globals.get(slot as usize).is_some_and(|v| !v.is_void()));
                     self.stack.push(Value::bool(is_ok));
                 }
                 Op::ErrorField => {
@@ -1090,7 +1068,7 @@ impl VM {
                     // Now only used for global variables (locals are resolved at compile time)
                     let slot = read_u16!() as usize;
                     let is_present = self.globals.get(slot)
-                        .map_or(false, |v| !v.is_void());
+                        .is_some_and(|v| !v.is_void());
                     self.stack.push(Value::bool(is_present));
                 }
 
@@ -1261,7 +1239,7 @@ impl VM {
         let chunk_idx = self.frames.last()?.chunk_idx;
         let chunk = &self.chunks[chunk_idx];
         for local in &chunk.locals {
-            if local.name == name.as_ref() {
+            if local.name == name {
                 return Some(local.slot);
             }
         }
@@ -1320,7 +1298,7 @@ impl VM {
     pub(crate) fn error_check(&self, slot: u16) -> bool {
         self.ok_vars.contains(&slot) ||
             (!self.error_vars.contains_key(&slot) &&
-             self.globals.get(slot as usize).map_or(false, |v| !v.is_void()))
+             self.globals.get(slot as usize).is_some_and(|v| !v.is_void()))
     }
 
     pub(crate) fn error_field(&self, slot: u16) -> String {
@@ -1343,7 +1321,7 @@ impl VM {
     }
 
     pub(crate) fn optional_check(&self, slot: usize) -> bool {
-        self.globals.get(slot).map_or(false, |v| !v.is_void())
+        self.globals.get(slot).is_some_and(|v| !v.is_void())
     }
 
     pub(crate) fn get_dollar_index(&self, idx: usize) -> Option<Value> {
@@ -1399,8 +1377,8 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
 
 pub(crate) fn generic_add(mut a: Value, b: Value) -> Result<Value, String> {
     // Fast path: try in-place string append when left operand is uniquely owned
-    if a.is_string() && b.is_string() {
-        if let Some(b_str) = b.as_str_ref() {
+    if a.is_string() && b.is_string()
+        && let Some(b_str) = b.as_str_ref() {
             if a.try_string_append_in_place(b_str) {
                 return Ok(a);
             }
@@ -1412,7 +1390,6 @@ pub(crate) fn generic_add(mut a: Value, b: Value) -> Result<Value, String> {
                 return Ok(Value::string_owned(s));
             }
         }
-    }
     match (a.kind(), b.kind()) {
         (VK::Int(x), VK::Int(y)) => Ok(Value::int(x + y)),
         (VK::Float(x), VK::Float(y)) => Ok(Value::float(x + y)),

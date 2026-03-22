@@ -28,6 +28,12 @@ struct LoopCtx {
     continue_jumps: Vec<usize>,
 }
 
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Compiler {
     pub fn new() -> Self {
         Self {
@@ -100,17 +106,14 @@ impl Compiler {
                     self.chunk.patch_jump(end_jump);
                 } else {
                     // Optimization: x = x + expr → StringAppendLocal (avoids Rc clone overhead)
-                    if let ExprKind::BinaryOp { left, op: BinOp::Add, right } = &expr.kind {
-                        if let ExprKind::Ident(ref lhs_name) = left.kind {
-                            if lhs_name.eq_ignore_ascii_case(name) {
-                                if let Some(slot) = self.resolve_local(name) {
+                    if let ExprKind::BinaryOp { left, op: BinOp::Add, right } = &expr.kind
+                        && let ExprKind::Ident(ref lhs_name) = left.kind
+                            && lhs_name.eq_ignore_ascii_case(name)
+                                && let Some(slot) = self.resolve_local(name) {
                                     self.compile_expr(right)?;
                                     self.chunk.emit_u16(Op::StringAppendLocal, slot, line);
                                     return Ok(());
                                 }
-                            }
-                        }
-                    }
                     self.compile_expr(expr)?;
                     self.set_variable(name, line);
                 }
@@ -490,8 +493,8 @@ impl Compiler {
         }
 
         // Int op Float / Float op Int (promote to float)
-        if let Some(a) = match &left.kind { ExprKind::Int(n) => Some(*n as f64), ExprKind::Float(n) => Some(*n), _ => None } {
-            if let Some(b) = match &right.kind { ExprKind::Int(n) => Some(*n as f64), ExprKind::Float(n) => Some(*n), _ => None } {
+        if let Some(a) = match &left.kind { ExprKind::Int(n) => Some(*n as f64), ExprKind::Float(n) => Some(*n), _ => None }
+            && let Some(b) = match &right.kind { ExprKind::Int(n) => Some(*n as f64), ExprKind::Float(n) => Some(*n), _ => None } {
                 // Only fold mixed int/float cases (pure int and pure float already handled above)
                 let is_mixed = matches!((&left.kind, &right.kind), (ExprKind::Int(_), ExprKind::Float(_)) | (ExprKind::Float(_), ExprKind::Int(_)));
                 if is_mixed {
@@ -512,13 +515,12 @@ impl Compiler {
                     }
                 }
             }
-        }
 
         // String + String (concatenation)
-        if op == BinOp::Add {
-            if let (ExprKind::String(left_parts), ExprKind::String(right_parts)) = (&left.kind, &right.kind) {
-                if left_parts.len() == 1 && right_parts.len() == 1 {
-                    if let (StringPart::Literal(a), StringPart::Literal(b)) = (&left_parts[0], &right_parts[0]) {
+        if op == BinOp::Add
+            && let (ExprKind::String(left_parts), ExprKind::String(right_parts)) = (&left.kind, &right.kind)
+                && left_parts.len() == 1 && right_parts.len() == 1
+                    && let (StringPart::Literal(a), StringPart::Literal(b)) = (&left_parts[0], &right_parts[0]) {
                         let mut concat = String::with_capacity(a.len() + b.len());
                         concat.push_str(a);
                         concat.push_str(b);
@@ -526,9 +528,6 @@ impl Compiler {
                         self.chunk.emit_u16(Op::LoadConst, idx, line);
                         return Ok(());
                     }
-                }
-            }
-        }
 
         // Bool && Bool, Bool || Bool (already handled by short-circuit above, but
         // constant fold for completeness if both are literal bools)
@@ -544,15 +543,13 @@ impl Compiler {
         if (op == BinOp::Sub || op == BinOp::Add)
             && let ExprKind::Ident(name) = &left.kind
             && let ExprKind::Int(imm) = &right.kind
-        {
-            if let Some(slot) = self.resolve_local(name) {
+            && let Some(slot) = self.resolve_local(name) {
                 let super_op = if op == BinOp::Sub { Op::SubLocalImm } else { Op::AddLocalImm };
                 self.chunk.emit(super_op, line);
                 self.chunk.code.extend_from_slice(&slot.to_le_bytes());
                 self.chunk.code.extend_from_slice(&imm.to_le_bytes());
                 return Ok(());
             }
-        }
 
         self.compile_expr(left)?;
         self.compile_expr(right)?;
@@ -590,13 +587,12 @@ impl Compiler {
     // ===================================================================
 
     fn compile_string(&mut self, parts: &[StringPart], line: u32) -> Result<(), String> {
-        if parts.len() == 1 {
-            if let StringPart::Literal(s) = &parts[0] {
+        if parts.len() == 1
+            && let StringPart::Literal(s) = &parts[0] {
                 let idx = self.chunk.constants.add(s);
                 self.chunk.emit_u16(Op::LoadConst, idx, line);
                 return Ok(());
             }
-        }
         for part in parts {
             match part {
                 StringPart::Literal(s) => {
@@ -620,14 +616,13 @@ impl Compiler {
         let lower = name.to_ascii_lowercase();
 
         // Direct call for known user functions
-        if resolution == Resolution::OwnFirst || resolution == Resolution::Normal {
-            if let Some(&chunk_idx) = self.fn_chunks.get(&lower) {
+        if (resolution == Resolution::OwnFirst || resolution == Resolution::Normal)
+            && let Some(&chunk_idx) = self.fn_chunks.get(&lower) {
                 self.chunk.emit(Op::CallLocal, line);
                 self.chunk.code.extend_from_slice(&chunk_idx.to_le_bytes());
                 self.chunk.code.push(argc);
                 return Ok(());
             }
-        }
 
         // Generic call
         let name_idx = self.chunk.constants.add(&lower);

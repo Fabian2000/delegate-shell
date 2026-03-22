@@ -177,7 +177,7 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
         let Some(delim) = args[1].as_str_ref() else {
             return Err(format!("expected string, got {}", args[1].type_name()));
         };
-        let parts: Vec<Value> = s.split(delim).map(|p| Value::string_from(p)).collect();
+        let parts: Vec<Value> = s.split(delim).map(Value::string_from).collect();
         Ok(new_list(parts))
     })?;
 

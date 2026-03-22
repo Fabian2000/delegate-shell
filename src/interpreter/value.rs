@@ -39,7 +39,7 @@ use indexmap::IndexMap;
 // ---------------------------------------------------------------------------
 
 const QNAN: u64        = 0x7FF8_0000_0000_0000;
-const TAG_INT: u64     = QNAN | (0 << 48);
+const TAG_INT: u64     = QNAN;
 const TAG_BOOL: u64    = QNAN | (1 << 48);
 const TAG_VOID: u64    = QNAN | (2 << 48);
 const TAG_STRING: u64  = QNAN | (3 << 48);
@@ -206,7 +206,7 @@ impl Value {
 
     #[inline]
     pub fn int(n: i64) -> Self {
-        if n >= MIN_INLINE_INT && n <= MAX_INLINE_INT {
+        if (MIN_INLINE_INT..=MAX_INLINE_INT).contains(&n) {
             Self(TAG_INT | (n as u64 & PAYLOAD_MASK))
         } else {
             // BigInt: heap-allocate
@@ -358,18 +358,17 @@ impl Value {
     pub fn is_float(&self) -> bool {
         // It's a float if it's NOT one of our tagged patterns
         let tag = self.tag();
-        tag < QNAN || tag > TAG_BOXED
+        !(QNAN..=TAG_BOXED).contains(&tag)
     }
 
     #[inline]
     pub fn is_int(&self) -> bool {
         if self.tag() == TAG_INT { return true; }
         // Check for BigInt
-        if self.tag() == TAG_BOXED {
-            if let Some(hv) = self.as_heap() {
+        if self.tag() == TAG_BOXED
+            && let Some(hv) = self.as_heap() {
                 return matches!(hv, HeapValue::BigInt(_));
             }
-        }
         false
     }
 
@@ -386,32 +385,32 @@ impl Value {
 
     pub fn is_lambda(&self) -> bool {
         if self.tag() != TAG_BOXED { return false; }
-        self.as_heap().map_or(false, |hv| matches!(hv, HeapValue::Lambda(_)))
+        self.as_heap().is_some_and(|hv| matches!(hv, HeapValue::Lambda(_)))
     }
 
     pub fn is_command_result(&self) -> bool {
         if self.tag() != TAG_BOXED { return false; }
-        self.as_heap().map_or(false, |hv| matches!(hv, HeapValue::CommandResult(_)))
+        self.as_heap().is_some_and(|hv| matches!(hv, HeapValue::CommandResult(_)))
     }
 
     pub fn is_thread_handle(&self) -> bool {
         if self.tag() != TAG_BOXED { return false; }
-        self.as_heap().map_or(false, |hv| matches!(hv, HeapValue::ThreadHandle(_)))
+        self.as_heap().is_some_and(|hv| matches!(hv, HeapValue::ThreadHandle(_)))
     }
 
     pub fn is_bytes(&self) -> bool {
         if self.tag() != TAG_BOXED { return false; }
-        self.as_heap().map_or(false, |hv| matches!(hv, HeapValue::Bytes(_)))
+        self.as_heap().is_some_and(|hv| matches!(hv, HeapValue::Bytes(_)))
     }
 
     pub fn is_file_handle(&self) -> bool {
         if self.tag() != TAG_BOXED { return false; }
-        self.as_heap().map_or(false, |hv| matches!(hv, HeapValue::FileHandle(_)))
+        self.as_heap().is_some_and(|hv| matches!(hv, HeapValue::FileHandle(_)))
     }
 
     pub fn is_atomic(&self) -> bool {
         if self.tag() != TAG_BOXED { return false; }
-        self.as_heap().map_or(false, |hv| matches!(hv, HeapValue::Atomic(_)))
+        self.as_heap().is_some_and(|hv| matches!(hv, HeapValue::Atomic(_)))
     }
 
     // --- Extractors ---
@@ -533,13 +532,6 @@ impl Value {
         unsafe { Some(&*ptr) }
     }
 
-    fn _as_heap_mut(&self) -> Option<&mut HeapValue> {
-        if self.tag() != TAG_BOXED { return None; }
-        let ptr = self.payload() as *mut HeapValue;
-        if ptr.is_null() { return None; }
-        unsafe { Some(&mut *ptr) }
-    }
-
     pub fn as_lambda(&self) -> Option<&LambdaData> {
         match self.as_heap()? {
             HeapValue::Lambda(d) => Some(d),
@@ -631,10 +623,10 @@ impl Value {
             t if t == TAG_INT => self.payload() != 0,
             t if t == TAG_VOID => false,
             t if t == TAG_STRING => {
-                self.as_str_ref().map_or(false, |s| !s.is_empty())
+                self.as_str_ref().is_some_and(|s| !s.is_empty())
             }
             t if t == TAG_LIST => {
-                self.as_list_ref().map_or(true, |rc| !rc.borrow().is_empty())
+                self.as_list_ref().is_none_or(|rc| !rc.borrow().is_empty())
             }
             t if t == TAG_BOXED => {
                 match self.as_heap() {
@@ -646,7 +638,7 @@ impl Value {
             }
             _ => {
                 // Float
-                self.as_float().map_or(true, |f| f != 0.0)
+                self.as_float() != Some(0.0)
             }
         }
     }
