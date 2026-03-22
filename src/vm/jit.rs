@@ -1116,7 +1116,10 @@ impl JitManager {
         let self_ref = module.declare_func_in_func(func_id, &mut func);
 
         // Declare and import all helper function references
-        let helpers = HelperRefs::declare(module, &mut func);
+        let helpers = match HelperRefs::declare(module, &mut func) {
+            Some(h) => h,
+            None => return None,
+        };
 
         let mut builder = FunctionBuilder::new(&mut func, &mut self.builder_ctx);
         let ok = GenericJitCompiler::compile(&mut builder, chunk, self_ref, &helpers, chunk_idx);
@@ -1242,7 +1245,7 @@ struct HelperRefs {
 
 impl HelperRefs {
     #[allow(unused_mut, unused_assignments)]
-    fn declare(module: &mut JITModule, func: &mut Function) -> Self {
+    fn declare(module: &mut JITModule, func: &mut Function) -> Option<Self> {
         let i64t = types::I64;
 
         // Helper to declare an external function and get its func ref
@@ -1251,12 +1254,12 @@ impl HelperRefs {
                 let mut sig = module.make_signature();
                 $(sig.params.push(AbiParam::new($p));)*
                 $(sig.returns.push(AbiParam::new($r));)*
-                let id = module.declare_function($name, Linkage::Import, &sig).unwrap();
+                let id = module.declare_function($name, Linkage::Import, &sig).ok()?;
                 module.declare_func_in_func(id, func)
             }};
         }
 
-        Self {
+        Some(Self {
             binary_op: decl!(H_BINARY_OP, [i64t, i64t, i64t], [i64t]),
             negate: decl!(H_NEGATE, [i64t], [i64t]),
             bitnot: decl!(H_BITNOT, [i64t], [i64t]),
@@ -1298,7 +1301,7 @@ impl HelperRefs {
             alias: decl!(H_ALIAS, [i64t, i64t], []),
             use_fn: decl!(H_USE, [i64t, i64t], []),
             atomic: decl!(H_ATOMIC, [i64t], [i64t]),
-        }
+        })
     }
 }
 
