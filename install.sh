@@ -4,6 +4,17 @@ set -e
 REPO="Fabian2000/delegate-shell"
 INSTALL_DIR="/usr/local/bin"
 
+# Detect download tool
+if command -v curl >/dev/null 2>&1; then
+    DL="curl -sL"
+    DL_OUT="curl -sL -o"
+elif command -v wget >/dev/null 2>&1; then
+    DL="wget -qO-"
+    DL_OUT="wget -qO"
+else
+    echo "Error: curl or wget required"; exit 1
+fi
+
 # Detect OS and architecture
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
@@ -24,7 +35,7 @@ ASSET="dgsh-${OS_NAME}-${ARCH_NAME}.tar.gz"
 
 # Get latest release tag
 echo "Fetching latest release..."
-TAG=$(curl -sL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+TAG=$($DL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | head -1 | cut -d'"' -f4)
 
 if [ -z "$TAG" ]; then
     echo "Failed to fetch latest release. Check https://github.com/${REPO}/releases"
@@ -36,7 +47,7 @@ echo "Installing dgsh ${TAG} for ${OS_NAME}-${ARCH_NAME}..."
 # Download and extract
 URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
 TMPDIR=$(mktemp -d)
-curl -sL "$URL" -o "${TMPDIR}/${ASSET}"
+$DL_OUT "${TMPDIR}/${ASSET}" "$URL"
 
 if [ ! -s "${TMPDIR}/${ASSET}" ]; then
     echo "Download failed. URL: ${URL}"
