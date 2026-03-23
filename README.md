@@ -82,8 +82,11 @@ else
     println("Error: {result?.error}")
 
 # Lambda and higher-order functions
+double(n)
+    return n * 2
+
 numbers = [1, 2, 3, 4, 5]
-doubled = map!!(numbers, @add!(0))
+doubled = map!!(numbers, @double)
 println("{doubled}")
 ```
 
