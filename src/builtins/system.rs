@@ -142,7 +142,7 @@ fn builtin_input(args: &[Value]) -> Result<Value, String> {
     Ok(Value::string_from(&buf))
 }
 
-fn builtin_env_set(args: &[Value], interp: &mut crate::interpreter::Interpreter) -> Result<Value, String> {
+fn builtin_env_set(args: &[Value], interp: &mut crate::interpreter::Runtime) -> Result<Value, String> {
     if !interp.allow_exec() {
         return Err("env_set() is disabled in sandbox mode".to_string());
     }
@@ -157,7 +157,7 @@ fn builtin_env_set(args: &[Value], interp: &mut crate::interpreter::Interpreter)
     Ok(Value::void())
 }
 
-fn builtin_exec(args: &[Value], interp: &mut crate::interpreter::Interpreter) -> Result<Value, String> {
+fn builtin_exec(args: &[Value], interp: &mut crate::interpreter::Runtime) -> Result<Value, String> {
     if !interp.allow_exec() {
         return Err("exec() is disabled in sandbox mode".to_string());
     }
@@ -168,6 +168,10 @@ fn builtin_exec(args: &[Value], interp: &mut crate::interpreter::Interpreter) ->
         return Err(format!("expected list, got {}", args[1].type_name()));
     };
     let str_args: Vec<String> = list.borrow().iter().map(ToString::to_string).collect();
+
+    if !std::path::Path::new(path).exists() {
+        return Err(format!("exec('{path}'): file not found"));
+    }
 
     let output = Command::new(path)
         .args(&str_args)
@@ -185,7 +189,7 @@ fn builtin_exec(args: &[Value], interp: &mut crate::interpreter::Interpreter) ->
     }))
 }
 
-fn builtin_exec_in(args: &[Value], interp: &mut crate::interpreter::Interpreter) -> Result<Value, String> {
+fn builtin_exec_in(args: &[Value], interp: &mut crate::interpreter::Runtime) -> Result<Value, String> {
     if !interp.allow_exec() {
         return Err("exec_in() is disabled in sandbox mode".to_string());
     }
@@ -204,6 +208,10 @@ fn builtin_exec_in(args: &[Value], interp: &mut crate::interpreter::Interpreter)
     } else {
         return Err(format!("expected string or bytes, got {}", args[2].type_name()));
     };
+
+    if !std::path::Path::new(path).exists() {
+        return Err(format!("exec_in('{path}'): file not found"));
+    }
 
     let mut child = Command::new(path)
         .args(&str_args)

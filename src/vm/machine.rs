@@ -1,6 +1,6 @@
 use std::rc::Rc;
 use crate::interpreter::value::{Value, ValueKind as VK, new_list, new_object};
-use crate::interpreter::Interpreter;
+use crate::interpreter::Runtime;
 use crate::parser::ast::Resolution;
 use super::bytecode::{Op, Chunk};
 
@@ -70,7 +70,7 @@ impl VM {
         }
     }
 
-    pub fn execute(&mut self, chunks: Vec<Chunk>, interp: &mut Interpreter) -> Result<(), String> {
+    pub fn execute(&mut self, chunks: Vec<Chunk>, interp: &mut Runtime) -> Result<(), String> {
         let chunk_count = chunks.len();
         // Initialize global variable slots from the top-level chunk's metadata
         if !chunks.is_empty() {
@@ -88,7 +88,7 @@ impl VM {
     }
 
     /// Run a single frame and return its result value. Used by JIT helpers.
-    pub(crate) fn run_frame(&mut self, interp: &mut Interpreter) -> Result<Value, String> {
+    pub(crate) fn run_frame(&mut self, interp: &mut Runtime) -> Result<Value, String> {
         let _target_depth = self.frames.len() - 1;
         self.run(interp)?;
         // The return value should be on the stack
@@ -96,7 +96,7 @@ impl VM {
     }
 
     #[inline(never)]
-    fn run(&mut self, interp: &mut Interpreter) -> Result<(), String> {
+    fn run(&mut self, interp: &mut Runtime) -> Result<(), String> {
         // Cache hot values in locals for the dispatch loop
         let mut frame_idx = self.frames.len() - 1;
 
@@ -296,7 +296,7 @@ impl VM {
                                     std::mem::forget(v);
                                 }
                                 let vm_ptr = self as *mut VM;
-                                let interp_ptr = interp as *mut Interpreter;
+                                let interp_ptr = interp as *mut Runtime;
                                 let chunks_ptr = &self.chunks as *const Vec<Chunk>;
                                 crate::vm::jit::set_jit_context(vm_ptr, interp_ptr, chunks_ptr, target_chunk);
                                 let result_raw = unsafe { self.jit.as_ref().ok_or("VM: JIT not initialized")?.call_jit_fn(ptr, &raw_args, self.call_depth as u64) };

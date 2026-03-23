@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use delegate_shell::interpreter::value::Value;
-use delegate_shell::Interpreter;
+use delegate_shell::Runtime;
 
 #[derive(Clone)]
 pub struct Job {
@@ -54,7 +54,7 @@ impl JobManager {
         let result_clone = result.clone();
 
         thread::spawn(move || {
-            let mut engine = match Interpreter::new() {
+            let mut engine = match Runtime::new() {
                 Ok(e) => e,
                 Err(e) => {
                     *result_clone.lock().unwrap_or_else(|p| p.into_inner()) = Some(Err(e));

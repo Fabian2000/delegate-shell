@@ -135,7 +135,7 @@ fn reverse(args: &[Value]) -> Result<Value, String> {
     }
 }
 
-fn match_regex(args: &[Value]) -> Result<Value, String> {
+fn re_match(args: &[Value]) -> Result<Value, String> {
     let Some(s) = args[0].as_str_ref() else {
         return Err(format!("expected string, got {}", args[0].type_name()));
     };
@@ -154,7 +154,7 @@ fn match_regex(args: &[Value]) -> Result<Value, String> {
     })
 }
 
-fn match_all(args: &[Value]) -> Result<Value, String> {
+fn re_match_all(args: &[Value]) -> Result<Value, String> {
     let Some(s) = args[0].as_str_ref() else {
         return Err(format!("expected string, got {}", args[0].type_name()));
     };
@@ -167,6 +167,46 @@ fn match_all(args: &[Value]) -> Result<Value, String> {
         .map(|m| Value::string_from(m.as_str()))
         .collect();
     Ok(new_list(matches))
+}
+
+fn re_replace(args: &[Value]) -> Result<Value, String> {
+    let Some(s) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
+    let Some(pattern) = args[1].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[1].type_name()));
+    };
+    let Some(replacement) = args[2].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[2].type_name()));
+    };
+    let re = regex::Regex::new(pattern)
+        .map_err(|e| format!("Invalid regex '{pattern}': {e}"))?;
+    Ok(Value::string_from(&re.replace_all(s, replacement)))
+}
+
+fn re_split(args: &[Value]) -> Result<Value, String> {
+    let Some(s) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
+    let Some(pattern) = args[1].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[1].type_name()));
+    };
+    let re = regex::Regex::new(pattern)
+        .map_err(|e| format!("Invalid regex '{pattern}': {e}"))?;
+    let parts: Vec<Value> = re.split(s).map(Value::string_from).collect();
+    Ok(new_list(parts))
+}
+
+fn re_test(args: &[Value]) -> Result<Value, String> {
+    let Some(s) = args[0].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[0].type_name()));
+    };
+    let Some(pattern) = args[1].as_str_ref() else {
+        return Err(format!("expected string, got {}", args[1].type_name()));
+    };
+    let re = regex::Regex::new(pattern)
+        .map_err(|e| format!("Invalid regex '{pattern}': {e}"))?;
+    Ok(Value::bool(re.is_match(s)))
 }
 
 pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
@@ -253,8 +293,11 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
         Ok(new_list(chars))
     })?;
 
-    reg.add("match", &[Param::Required(Type::String), Param::Required(Type::String)], Type::Dyn, match_regex)?;
-    reg.add("match_all", &[Param::Required(Type::String), Param::Required(Type::String)], Type::List, match_all)?;
+    reg.add("re_match", &[Param::Required(Type::String), Param::Required(Type::String)], Type::Dyn, re_match)?;
+    reg.add("re_match_all", &[Param::Required(Type::String), Param::Required(Type::String)], Type::List, re_match_all)?;
+    reg.add("re_replace", &[Param::Required(Type::String), Param::Required(Type::String), Param::Required(Type::String)], Type::String, re_replace)?;
+    reg.add("re_split", &[Param::Required(Type::String), Param::Required(Type::String)], Type::List, re_split)?;
+    reg.add("re_test", &[Param::Required(Type::String), Param::Required(Type::String)], Type::Bool, re_test)?;
 
     Ok(())
 }

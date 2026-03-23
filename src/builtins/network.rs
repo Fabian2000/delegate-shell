@@ -1,17 +1,17 @@
 use indexmap::IndexMap;
 use crate::interpreter::value::{Value, new_object};
-use crate::interpreter::Interpreter;
+use crate::interpreter::Runtime;
 use std::io::Read;
 use super::registry::{BuiltinRegistry, Param, Type};
 
-fn check_network(interp: &Interpreter, fn_name: &str) -> Result<(), String> {
+fn check_network(interp: &Runtime, fn_name: &str) -> Result<(), String> {
     if !interp.allow_network() {
         return Err(format!("{fn_name}() is disabled when network access is not allowed"));
     }
     Ok(())
 }
 
-fn http_get(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+fn http_get(args: &[Value], interp: &mut Runtime) -> Result<Value, String> {
     check_network(interp, "http_get")?;
     let Some(url) = args[0].as_str_ref() else {
         return Err(format!("expected string, got {}", args[0].type_name()));
@@ -29,7 +29,7 @@ fn http_get(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
     Ok(body_response(resp))
 }
 
-fn http_post(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+fn http_post(args: &[Value], interp: &mut Runtime) -> Result<Value, String> {
     check_network(interp, "http_post")?;
     let Some(url) = args[0].as_str_ref() else {
         return Err(format!("expected string, got {}", args[0].type_name()));
@@ -50,7 +50,7 @@ fn http_post(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> 
     Ok(body_response(resp))
 }
 
-fn http_put(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+fn http_put(args: &[Value], interp: &mut Runtime) -> Result<Value, String> {
     check_network(interp, "http_put")?;
     let Some(url) = args[0].as_str_ref() else {
         return Err(format!("expected string, got {}", args[0].type_name()));
@@ -71,7 +71,7 @@ fn http_put(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
     Ok(body_response(resp))
 }
 
-fn http_delete(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+fn http_delete(args: &[Value], interp: &mut Runtime) -> Result<Value, String> {
     check_network(interp, "http_delete")?;
     let Some(url) = args[0].as_str_ref() else {
         return Err(format!("expected string, got {}", args[0].type_name()));
@@ -89,7 +89,7 @@ fn http_delete(args: &[Value], interp: &mut Interpreter) -> Result<Value, String
     Ok(body_response(resp))
 }
 
-fn download(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+fn download(args: &[Value], interp: &mut Runtime) -> Result<Value, String> {
     check_network(interp, "download")?;
     let Some(url) = args[0].as_str_ref() else {
         return Err(format!("expected string, got {}", args[0].type_name()));
@@ -109,7 +109,7 @@ fn download(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
     Ok(Value::void())
 }
 
-fn ip(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+fn ip(args: &[Value], interp: &mut Runtime) -> Result<Value, String> {
     check_network(interp, "ip")?;
     let _ = args;
     let socket = std::net::UdpSocket::bind("0.0.0.0:0")

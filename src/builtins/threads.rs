@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::thread;
 use crate::interpreter::value::{Value, ThreadJoinHandle, new_list};
-use crate::interpreter::Interpreter;
+use crate::interpreter::Runtime;
 use crate::parser::ast::Resolution;
 use super::registry::{BuiltinRegistry, Param, Type};
 
@@ -14,7 +14,7 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     Ok(())
 }
 
-fn builtin_thread(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+fn builtin_thread(args: &[Value], interp: &mut Runtime) -> Result<Value, String> {
     let lambda = if let Some(data) = args[0].as_lambda() {
         (data.name.clone(), data.resolution, data.bound_args.iter().map(Value::to_sendable).collect::<Vec<_>>())
     } else {
@@ -24,18 +24,22 @@ fn builtin_thread(args: &[Value], interp: &mut Interpreter) -> Result<Value, Str
     // Clone user functions so the thread has its own copy
     let user_fns = interp.env.clone_fns();
 
-    // Inherit sandbox flags from parent interpreter
+    // Inherit sandbox flags and name mappings from parent interpreter
     let parent_allow_exec = interp.allow_exec();
     let parent_allow_network = interp.allow_network();
+    let parent_use_paths = interp.env.use_paths.clone();
+    let parent_aliases = interp.env.aliases.clone();
 
     let (fn_name, res_code, sendable_args) = lambda;
 
     let handle = thread::spawn(move || {
-        let mut thread_interp = Interpreter::new()
+        let mut thread_interp = Runtime::new()
             .map_err(|e| format!("thread init failed: {e}"))?;
         thread_interp.set_allow_exec(parent_allow_exec);
         thread_interp.set_allow_network(parent_allow_network);
         thread_interp.env.restore_fns(user_fns);
+        thread_interp.env.use_paths = parent_use_paths;
+        thread_interp.env.aliases = parent_aliases;
 
         let call_args: Vec<Value> = sendable_args.into_iter().map(Value::from_sendable).collect();
         let resolution = match res_code {

@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use delegate_shell::Interpreter;
+use delegate_shell::Runtime;
 
 mod shell;
 
@@ -40,7 +40,7 @@ fn main() {
         return;
     }
 
-    let source = if args[1] == "-c" || args[1] == "-e" {
+    let source = if args[1] == "-c" {
         if args.len() < 3 {
             eprintln!("Usage: dgsh {} '<code>'", args[1]);
             std::process::exit(1);
@@ -72,8 +72,8 @@ fn main() {
     }
 }
 
-fn make_engine(raw_args: &[String]) -> Interpreter {
-    let mut engine = Interpreter::new().unwrap_or_else(|e| {
+fn make_engine(raw_args: &[String]) -> Runtime {
+    let mut engine = Runtime::new().unwrap_or_else(|e| {
         eprintln!("Failed to initialize: {e}");
         std::process::exit(1);
     });
@@ -176,7 +176,6 @@ fn print_help() {
     eprintln!();
     eprintln!("Options:");
     eprintln!("  -c '<code>'     Execute code string");
-    eprintln!("  -e '<code>'     Execute code string (alias for -c)");
     eprintln!("  -migrate <file> Migrate a bash script to dgsh");
     eprintln!("  --vm            Force bytecode VM execution");
     eprintln!("  --jit           Force JIT compilation");

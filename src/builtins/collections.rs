@@ -1,5 +1,5 @@
 use crate::interpreter::value::{Value, ValueKind as VK, new_list, new_object};
-use crate::interpreter::Interpreter;
+use crate::interpreter::Runtime;
 use super::registry::{BuiltinRegistry, Param, Type};
 
 pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
@@ -303,7 +303,7 @@ fn builtin_max(args: &[Value]) -> Result<Value, String> {
 
 // --- Named interpreter-dependent functions ---
 
-fn builtin_map(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+fn builtin_map(args: &[Value], interp: &mut Runtime) -> Result<Value, String> {
     let Some(l) = args[0].as_list_ref() else {
         return Err(format!("expected list, got {}", args[0].type_name()));
     };
@@ -316,7 +316,7 @@ fn builtin_map(args: &[Value], interp: &mut Interpreter) -> Result<Value, String
     Ok(new_list(result))
 }
 
-fn builtin_filter(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+fn builtin_filter(args: &[Value], interp: &mut Runtime) -> Result<Value, String> {
     let Some(l) = args[0].as_list_ref() else {
         return Err(format!("expected list, got {}", args[0].type_name()));
     };
@@ -332,7 +332,7 @@ fn builtin_filter(args: &[Value], interp: &mut Interpreter) -> Result<Value, Str
     Ok(new_list(result))
 }
 
-fn builtin_reduce(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+fn builtin_reduce(args: &[Value], interp: &mut Runtime) -> Result<Value, String> {
     let Some(l) = args[0].as_list_ref() else {
         return Err(format!("expected list, got {}", args[0].type_name()));
     };
@@ -345,7 +345,7 @@ fn builtin_reduce(args: &[Value], interp: &mut Interpreter) -> Result<Value, Str
     Ok(acc)
 }
 
-fn builtin_sort_by(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+fn builtin_sort_by(args: &[Value], interp: &mut Runtime) -> Result<Value, String> {
     let Some(l) = args[0].as_list_ref() else {
         return Err(format!("expected list, got {}", args[0].type_name()));
     };
@@ -361,7 +361,7 @@ fn builtin_sort_by(args: &[Value], interp: &mut Interpreter) -> Result<Value, St
     Ok(new_list(sorted))
 }
 
-fn builtin_find(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+fn builtin_find(args: &[Value], interp: &mut Runtime) -> Result<Value, String> {
     let Some(l) = args[0].as_list_ref() else {
         return Err(format!("expected list, got {}", args[0].type_name()));
     };
@@ -376,7 +376,7 @@ fn builtin_find(args: &[Value], interp: &mut Interpreter) -> Result<Value, Strin
     Err("find(): no element matches".to_string())
 }
 
-fn builtin_count(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+fn builtin_count(args: &[Value], interp: &mut Runtime) -> Result<Value, String> {
     let Some(l) = args[0].as_list_ref() else {
         return Err(format!("expected list, got {}", args[0].type_name()));
     };
@@ -392,7 +392,7 @@ fn builtin_count(args: &[Value], interp: &mut Interpreter) -> Result<Value, Stri
     Ok(Value::int(n))
 }
 
-fn builtin_any(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+fn builtin_any(args: &[Value], interp: &mut Runtime) -> Result<Value, String> {
     let Some(l) = args[0].as_list_ref() else {
         return Err(format!("expected list, got {}", args[0].type_name()));
     };
@@ -407,7 +407,7 @@ fn builtin_any(args: &[Value], interp: &mut Interpreter) -> Result<Value, String
     Ok(Value::bool(false))
 }
 
-fn builtin_all(args: &[Value], interp: &mut Interpreter) -> Result<Value, String> {
+fn builtin_all(args: &[Value], interp: &mut Runtime) -> Result<Value, String> {
     let Some(l) = args[0].as_list_ref() else {
         return Err(format!("expected list, got {}", args[0].type_name()));
     };

@@ -11,12 +11,12 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 
-use crate::interpreter::engine::Interpreter;
+use crate::interpreter::engine::Runtime;
 use crate::interpreter::value::Value;
 
 /// Opaque engine handle for FFI consumers.
 pub struct DgshEngine {
-    interp: Interpreter,
+    interp: Runtime,
     last_error: Option<CString>,
 }
 
@@ -34,7 +34,7 @@ pub struct DgshValue {
 /// Create a new dgsh engine with all builtins. Returns null on failure.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dgsh_new() -> *mut DgshEngine {
-    match Interpreter::new() {
+    match Runtime::new() {
         Ok(interp) => Box::into_raw(Box::new(DgshEngine {
             interp,
             last_error: None,
@@ -46,7 +46,7 @@ pub unsafe extern "C" fn dgsh_new() -> *mut DgshEngine {
 /// Create a sandboxed engine (core builtins only, no exec, no network).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dgsh_new_sandboxed() -> *mut DgshEngine {
-    match Interpreter::sandboxed() {
+    match Runtime::sandboxed() {
         Ok(interp) => Box::into_raw(Box::new(DgshEngine {
             interp,
             last_error: None,
@@ -406,7 +406,7 @@ pub unsafe extern "C" fn dgsh_register(
         &name,
         &[],
         crate::builtins::registry::Type::Dyn,
-        move |args: &[Value], _interp: &mut Interpreter| {
+        move |args: &[Value], _interp: &mut Runtime| {
             let mut ffi_args: Vec<*const DgshValue> = Vec::with_capacity(args.len());
             let mut ffi_vals: Vec<Box<DgshValue>> = Vec::with_capacity(args.len());
             for arg in args {
@@ -469,7 +469,7 @@ pub unsafe extern "C" fn dgsh_register_override(
         &name,
         &[],
         crate::builtins::registry::Type::Dyn,
-        move |args: &[Value], _interp: &mut Interpreter| {
+        move |args: &[Value], _interp: &mut Runtime| {
             let mut ffi_args: Vec<*const DgshValue> = Vec::with_capacity(args.len());
             let mut ffi_vals: Vec<Box<DgshValue>> = Vec::with_capacity(args.len());
             for arg in args {
@@ -582,7 +582,7 @@ pub unsafe extern "C" fn dgsh_new_with_access(level: i32) -> *mut DgshEngine {
         2 => crate::builtins::registry::BuiltinAccess::None,
         _ => crate::builtins::registry::BuiltinAccess::All,
     };
-    match Interpreter::with_access(access) {
+    match Runtime::with_access(access) {
         Ok(interp) => Box::into_raw(Box::new(DgshEngine {
             interp,
             last_error: None,

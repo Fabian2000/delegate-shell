@@ -12,18 +12,18 @@ use std::rc::Rc;
 use std::cell::Cell;
 use super::bytecode::{Chunk, Op};
 use crate::interpreter::value::{Value, ValueKind as VK, new_list, new_object};
-use crate::interpreter::Interpreter;
+use crate::interpreter::Runtime;
 use crate::parser::ast::Resolution;
 
 // Thread-local context for JIT helpers — avoids passing raw pointers through JIT'd code
 thread_local! {
     static JIT_VM_PTR: Cell<*mut super::machine::VM> = const { Cell::new(std::ptr::null_mut()) };
-    static JIT_INTERP_PTR: Cell<*mut Interpreter> = const { Cell::new(std::ptr::null_mut()) };
+    static JIT_INTERP_PTR: Cell<*mut Runtime> = const { Cell::new(std::ptr::null_mut()) };
     static JIT_CHUNKS_PTR: Cell<*const Vec<Chunk>> = const { Cell::new(std::ptr::null()) };
     static JIT_CHUNK_IDX: Cell<usize> = const { Cell::new(0) };
 }
 
-pub fn set_jit_context(vm: *mut super::machine::VM, interp: *mut Interpreter, chunks: *const Vec<Chunk>, chunk_idx: usize) {
+pub fn set_jit_context(vm: *mut super::machine::VM, interp: *mut Runtime, chunks: *const Vec<Chunk>, chunk_idx: usize) {
     JIT_VM_PTR.with(|c| c.set(vm));
     JIT_INTERP_PTR.with(|c| c.set(interp));
     JIT_CHUNKS_PTR.with(|c| c.set(chunks));
@@ -34,7 +34,7 @@ fn get_jit_vm() -> *mut super::machine::VM {
     JIT_VM_PTR.with(|c| c.get())
 }
 
-fn get_jit_interp() -> *mut Interpreter {
+fn get_jit_interp() -> *mut Runtime {
     JIT_INTERP_PTR.with(|c| c.get())
 }
 

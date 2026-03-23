@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::interpreter::value::Value;
-use crate::interpreter::Interpreter;
+use crate::interpreter::Runtime;
 
 // ---------------------------------------------------------------------------
 // Type metadata
@@ -88,7 +88,7 @@ impl Param {
 // Registry
 // ---------------------------------------------------------------------------
 
-type BuiltinHandler = std::rc::Rc<dyn Fn(&[Value], &mut Interpreter) -> Result<Value, String>>;
+type BuiltinHandler = std::rc::Rc<dyn Fn(&[Value], &mut Runtime) -> Result<Value, String>>;
 
 struct Entry {
     params: &'static [Param],
@@ -124,7 +124,7 @@ impl BuiltinRegistry {
         name: &str,
         params: &'static [Param],
         returns: Type,
-        f: impl Fn(&[Value], &mut Interpreter) -> Result<Value, String> + 'static,
+        f: impl Fn(&[Value], &mut Runtime) -> Result<Value, String> + 'static,
     ) -> Result<(), String> {
         if self.defs.contains_key(name) {
             return Err(format!("Duplicate builtin: '{name}'"));
@@ -138,7 +138,7 @@ impl BuiltinRegistry {
         name: &str,
         params: &'static [Param],
         returns: Type,
-        f: impl Fn(&[Value], &mut Interpreter) -> Result<Value, String> + 'static,
+        f: impl Fn(&[Value], &mut Runtime) -> Result<Value, String> + 'static,
     ) -> Result<(), String> {
         self.defs.insert(name.to_owned(), Entry { params, returns, handler: std::rc::Rc::new(f) });
         Ok(())
@@ -161,7 +161,7 @@ impl BuiltinRegistry {
         name: &str,
         params: &'static [Param],
         returns: Type,
-        f: fn(&[Value], &mut Interpreter) -> Result<Value, String>,
+        f: fn(&[Value], &mut Runtime) -> Result<Value, String>,
     ) -> Result<(), String> {
         self.register(name, params, returns, f)
     }
@@ -227,7 +227,7 @@ impl BuiltinRegistry {
         &self,
         name: &str,
         args: &[Value],
-        interpreter: &mut Interpreter,
+        interpreter: &mut Runtime,
     ) -> Option<Result<Value, String>> {
         match self.validate_and_get_handler(name, args)? {
             Ok(handler) => Some(handler(args, interpreter)),

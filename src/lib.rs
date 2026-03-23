@@ -9,7 +9,7 @@ pub mod vm;
 pub mod ffi;
 
 // Public API
-pub use interpreter::Interpreter;
+pub use interpreter::Runtime;
 pub use interpreter::engine::{DebugContext, DebugAction};
 pub use interpreter::value::Value;
 pub use builtins::registry::{BuiltinAccess, Param, Type};

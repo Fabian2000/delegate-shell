@@ -3,7 +3,7 @@ use rustyline::validate::MatchingBracketValidator;
 use rustyline::{CompletionType, Config, EditMode, Editor};
 use rustyline_derive::{Completer, Helper, Highlighter, Hinter, Validator};
 
-use delegate_shell::Interpreter;
+use delegate_shell::Runtime;
 
 use super::completion::DgshCompleter;
 use super::highlight::DgshHighlighter;
@@ -20,7 +20,7 @@ struct DgshHelper {
     validator: MatchingBracketValidator,
 }
 
-pub fn run(engine: &mut Interpreter) {
+pub fn run(engine: &mut Runtime) {
     // Register shell-only builtins
     register_shell_builtins(engine);
 
@@ -187,7 +187,7 @@ fn history_file() -> Option<String> {
     }
 }
 
-fn register_shell_builtins(engine: &mut Interpreter) {
+fn register_shell_builtins(engine: &mut Runtime) {
     use std::io::Write;
     use delegate_shell::builtins::registry::{Param, Type};
     use delegate_shell::interpreter::value::Value;

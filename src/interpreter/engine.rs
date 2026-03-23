@@ -42,7 +42,7 @@ pub enum DebugAction {
     Quit,
 }
 
-pub struct Interpreter {
+pub struct Runtime {
     pub(crate) env: Environment,
     /// Builtin function registry — owned per instance
     pub(crate) registry: crate::builtins::registry::BuiltinRegistry,
@@ -90,7 +90,7 @@ enum FlowSignal {
     Break,
 }
 
-impl Interpreter {
+impl Runtime {
     /// Create a new interpreter with all standard builtins.
     pub fn new() -> Result<Self, String> {
         Self::with_access(crate::builtins::registry::BuiltinAccess::All)
@@ -101,7 +101,7 @@ impl Interpreter {
         let mut registry = crate::builtins::registry::build_registry(access, true)?;
         // debugger() is always available regardless of access level
         registry.register("debugger", &[], crate::builtins::registry::Type::Void,
-            |_args: &[Value], interp: &mut Interpreter| {
+            |_args: &[Value], interp: &mut Runtime| {
                 interp.trigger_debugger()?;
                 Ok(Value::void())
             }
@@ -192,7 +192,7 @@ impl Interpreter {
         name: &str,
         params: &'static [crate::builtins::registry::Param],
         returns: crate::builtins::registry::Type,
-        f: impl Fn(&[Value], &mut Interpreter) -> Result<Value, String> + 'static,
+        f: impl Fn(&[Value], &mut Runtime) -> Result<Value, String> + 'static,
     ) -> Result<(), String> {
         self.registry.register(name, params, returns, f)
     }
@@ -203,7 +203,7 @@ impl Interpreter {
         name: &str,
         params: &'static [crate::builtins::registry::Param],
         returns: crate::builtins::registry::Type,
-        f: impl Fn(&[Value], &mut Interpreter) -> Result<Value, String> + 'static,
+        f: impl Fn(&[Value], &mut Runtime) -> Result<Value, String> + 'static,
     ) -> Result<(), String> {
         self.registry.register_override(name, params, returns, f)
     }
@@ -566,6 +566,9 @@ impl Interpreter {
                 if !self.allow_exec {
                     return Err("alias is disabled when exec is not allowed".to_string());
                 }
+                if self.env.aliases.contains_key(name.as_str()) || self.env.use_paths.contains_key(name.as_str()) {
+                    return Err(format!("'{name}' is already defined as an alias or use path"));
+                }
                 self.env.aliases.insert(name.to_string(), target.clone());
                 Ok(FlowSignal::None)
             }
@@ -832,15 +835,21 @@ impl Interpreter {
             let name = alias.unwrap_or_else(||
                 p.file_stem().and_then(|s| s.to_str()).unwrap_or(path)
             );
+            if self.env.use_paths.contains_key(name) || self.env.aliases.contains_key(name) {
+                return Err(format!("'{name}' is already defined as an alias or use path"));
+            }
             self.env.use_paths.insert(name.to_string(), path.to_owned());
         } else if p.is_dir() {
+            if alias.is_some() {
+                return Err(format!("use '{path}': cannot use 'as' with a directory"));
+            }
             let entries = std::fs::read_dir(p)
                 .map_err(|e| format!("use '{path}': {e}"))?;
             for entry in entries.flatten() {
                 let ep = entry.path();
                 if ep.is_file() && let Some(stem) = ep.file_stem().and_then(|s| s.to_str()) {
                     self.env.use_paths.insert(
-                        stem.to_ascii_lowercase(),
+                        stem.to_string(),
                         ep.to_string_lossy().to_string(),
                     );
                 }
