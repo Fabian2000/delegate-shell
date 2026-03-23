@@ -24,6 +24,10 @@ fn main() {
         print_help();
         return;
     }
+    if raw_args.iter().any(|a| a == "--mcp") {
+        shell::mcp::run_mcp_server();
+        return;
+    }
 
     let args: Vec<String> = std::iter::once(raw_args[0].clone())
         .chain(raw_args.iter().skip(1).filter(|a| !a.starts_with("--")).cloned())
@@ -180,6 +184,7 @@ fn print_help() {
     eprintln!("  --vm            Force bytecode VM execution");
     eprintln!("  --jit           Force JIT compilation");
     eprintln!("  --tw            Force tree-walk interpretation");
+    eprintln!("  --mcp           Start MCP server (Model Context Protocol over stdio)");
     eprintln!("  --version, -v   Show version");
     eprintln!("  --help, -h      Show this help");
     eprintln!();

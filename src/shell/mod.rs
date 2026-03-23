@@ -3,3 +3,4 @@ pub mod jobs;
 pub mod rc;
 pub mod completion;
 pub mod highlight;
+pub mod mcp;
