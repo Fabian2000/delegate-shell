@@ -7,6 +7,7 @@ pub mod errors;
 pub mod migrate;
 pub mod vm;
 pub mod ffi;
+pub mod aot;
 
 // Public API
 pub use interpreter::Runtime;

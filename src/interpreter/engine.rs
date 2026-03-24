@@ -635,6 +635,12 @@ impl Runtime {
 
     fn exec_inc_dec(&mut self, name: &str, increment: bool) -> Result<FlowSignal, String> {
         let current = self.get_var(name)?;
+        // Atomic: in-place mutation, don't replace the value
+        if let Some(a) = current.as_atomic() {
+            let delta = if increment { 1 } else { -1 };
+            let _ = a.fetch_add(delta);
+            return Ok(FlowSignal::None);
+        }
         match current.kind() {
             VK::Int(n) => {
                 let new_val = if increment { n + 1 } else { n - 1 };

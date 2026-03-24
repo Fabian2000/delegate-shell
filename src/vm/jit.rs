@@ -30,6 +30,10 @@ pub fn set_jit_context(vm: *mut super::machine::VM, interp: *mut Runtime, chunks
     JIT_CHUNK_IDX.with(|c| c.set(chunk_idx));
 }
 
+pub fn with_chunks_ptr<R>(f: impl FnOnce(*const Vec<Chunk>) -> R) -> R {
+    JIT_CHUNKS_PTR.with(|c| f(c.get()))
+}
+
 fn get_jit_vm() -> *mut super::machine::VM {
     JIT_VM_PTR.with(|c| c.get())
 }
@@ -44,6 +48,10 @@ fn get_jit_chunks() -> *const Vec<Chunk> {
 
 fn get_jit_chunk_idx() -> usize {
     JIT_CHUNK_IDX.with(|c| c.get())
+}
+
+pub fn set_jit_chunk_idx(idx: usize) {
+    JIT_CHUNK_IDX.with(|c| c.set(idx));
 }
 
 // ---------------------------------------------------------------------------
@@ -69,6 +77,7 @@ const BOP_SHL: u64 = 14;
 const BOP_SHR: u64 = 15;
 
 /// Generic binary op for ANY types. Takes ownership of both values.
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_binary_op(left: u64, right: u64, op_code: u64) -> u64 {
     let l = Value::from_raw(left);
     let r = Value::from_raw(right);
@@ -120,6 +129,7 @@ unsafe extern "C" fn jit_binary_op(left: u64, right: u64, op_code: u64) -> u64 {
 }
 
 /// Unary negate
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_negate(val: u64) -> u64 {
     {
         let v = Value::from_raw(val);
@@ -138,6 +148,7 @@ unsafe extern "C" fn jit_negate(val: u64) -> u64 {
 }
 
 /// Unary bitwise not
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_bitnot(val: u64) -> u64 {
     {
         let v = Value::from_raw(val);
@@ -154,6 +165,7 @@ unsafe extern "C" fn jit_bitnot(val: u64) -> u64 {
 }
 
 /// Logical not
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_not(val: u64) -> u64 {
     {
         let v = Value::from_raw(val);
@@ -166,6 +178,7 @@ unsafe extern "C" fn jit_not(val: u64) -> u64 {
 }
 
 /// Pow
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_pow(base: u64, exp: u64) -> u64 {
     {
         let b = Value::from_raw(base);
@@ -178,6 +191,7 @@ unsafe extern "C" fn jit_pow(base: u64, exp: u64) -> u64 {
 }
 
 /// Truthy check — returns 0 or 1 as raw i64
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_is_truthy(val: u64) -> u64 {
     {
         let v = Value::from_raw(val);
@@ -188,6 +202,7 @@ unsafe extern "C" fn jit_is_truthy(val: u64) -> u64 {
 }
 
 /// Clone a NaN-boxed value (increment refcount if needed)
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_clone_value(val: u64) -> u64 {
     {
         let v = Value::from_raw(val);
@@ -200,6 +215,7 @@ unsafe extern "C" fn jit_clone_value(val: u64) -> u64 {
 }
 
 /// Drop a NaN-boxed value (decrement refcount if needed)
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_drop_value(val: u64) {
     {
         let _ = Value::from_raw(val);
@@ -210,6 +226,7 @@ unsafe extern "C" fn jit_drop_value(val: u64) {
 
 /// Load true
 /// Get global variable
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_get_global(idx: u64) -> u64 {
     unsafe {
         let vm = &mut *get_jit_vm();
@@ -221,6 +238,7 @@ unsafe extern "C" fn jit_get_global(idx: u64) -> u64 {
 }
 
 /// Set global variable
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_set_global(idx: u64, val: u64) {
     unsafe {
         let vm = &mut *get_jit_vm();
@@ -232,6 +250,7 @@ unsafe extern "C" fn jit_set_global(idx: u64, val: u64) {
 }
 
 /// Field get: obj.field
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_field_get(obj: u64, field_idx: u64) -> u64 {
     unsafe {
         let o = Value::from_raw(obj);
@@ -260,6 +279,7 @@ unsafe extern "C" fn jit_field_get(obj: u64, field_idx: u64) -> u64 {
 }
 
 /// Field set: obj.field = val
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_field_set(obj: u64, field_idx: u64, val: u64) {
     unsafe {
         let o = Value::from_raw(obj);
@@ -279,6 +299,7 @@ unsafe extern "C" fn jit_field_set(obj: u64, field_idx: u64, val: u64) {
 }
 
 /// Index get: target[index]
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_index_get(target: u64, index: u64) -> u64 {
     {
         let t = Value::from_raw(target);
@@ -293,6 +314,7 @@ unsafe extern "C" fn jit_index_get(target: u64, index: u64) -> u64 {
 }
 
 /// Index set: target[index] = val
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_index_set(target: u64, index: u64, val: u64) {
     {
         let t = Value::from_raw(target);
@@ -317,6 +339,7 @@ unsafe extern "C" fn jit_index_set(target: u64, index: u64, val: u64) {
 }
 
 /// Make list from items on a scratch buffer
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_make_list(items_ptr: *const u64, count: u64) -> u64 {
     unsafe {
         let raw_items = std::slice::from_raw_parts(items_ptr, count as usize);
@@ -334,6 +357,7 @@ unsafe extern "C" fn jit_make_list(items_ptr: *const u64, count: u64) -> u64 {
 }
 
 /// Make object from key-value pairs (keys are Values, values are Values, interleaved)
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_make_object(pairs_ptr: *const u64, count: u64) -> u64 {
     unsafe {
         let raw_pairs = std::slice::from_raw_parts(pairs_ptr, (count as usize) * 2);
@@ -356,6 +380,7 @@ unsafe extern "C" fn jit_make_object(pairs_ptr: *const u64, count: u64) -> u64 {
 }
 
 /// Make string by concatenating parts
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_make_string(parts_ptr: *const u64, count: u64) -> u64 {
     unsafe {
         let raw_parts = std::slice::from_raw_parts(parts_ptr, count as usize);
@@ -373,6 +398,7 @@ unsafe extern "C" fn jit_make_string(parts_ptr: *const u64, count: u64) -> u64 {
 }
 
 /// Make range (start..=end as list)
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_make_range(start: u64, end: u64) -> u64 {
     {
         let s = Value::from_raw(start);
@@ -393,6 +419,7 @@ unsafe extern "C" fn jit_make_range(start: u64, end: u64) -> u64 {
 }
 
 /// Generic call (user fn or builtin with full resolution)
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_generic_call(
     name_idx: u64,
     res: u64,
@@ -466,6 +493,7 @@ unsafe extern "C" fn jit_generic_call(
 }
 
 /// Call builtin by name
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_call_builtin_v2(
     name_idx: u64,
     args_ptr: *const u64,
@@ -509,6 +537,7 @@ unsafe extern "C" fn jit_call_builtin_v2(
 }
 
 /// Make lambda
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_make_lambda(
     name_idx: u64,
     res: u64,
@@ -545,9 +574,18 @@ unsafe extern "C" fn jit_make_lambda(
 /// op: 0=inc, 1=dec
 /// mode: 0=inc(no push), 1=dec(no push), 2=post_inc, 3=post_dec, 4=pre_inc, 5=pre_dec
 /// Returns: the value to push on stack (or 0 if nothing to push)
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_inc_dec(val: u64, op: u64) -> u64 {
     {
         let v = Value::from_raw(val);
+        // Handle atomics: use fetch_add/fetch_sub for thread-safe increment
+        if let Some(atomic) = v.as_atomic() {
+            let delta: i64 = if op == 0 || op == 2 { 1 } else { -1 };
+            let _ = atomic.fetch_add(delta);
+            std::mem::forget(v);
+            // Return the atomic value itself (not a new int) to preserve atomicity
+            return val;
+        }
         let result = match op {
             0 => { // inc (no push)
                 if let Some(n) = v.as_int() { Value::int(n + 1) } else { v.clone() }
@@ -573,6 +611,7 @@ unsafe extern "C" fn jit_inc_dec(val: u64, op: u64) -> u64 {
 /// String append for a local: local_val + rhs.
 /// Takes ownership of local_val (caller must not forget it); forgets rhs.
 /// If both are strings and local_val has refcount 1, appends in-place.
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_string_append_local(local_val: u64, rhs: u64) -> u64 {
     {
         let mut lv = Value::from_raw(local_val);
@@ -621,6 +660,7 @@ unsafe extern "C" fn jit_string_append_local(local_val: u64, rhs: u64) -> u64 {
 
 /// Compound add/sub for a local
 /// op: 0=add, 1=sub
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_compound_op(local_val: u64, rhs: u64, op: u64) -> u64 {
     {
         let lv = Value::from_raw(local_val);
@@ -651,6 +691,7 @@ unsafe extern "C" fn jit_compound_op(local_val: u64, rhs: u64, op: u64) -> u64 {
 
 /// SuperInstruction: SubLocalImm / AddLocalImm
 /// Call a VM function by chunk index (used by CallLocal).
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_vm_call(
     chunk_idx: u64,
     args_ptr: *const u64,
@@ -702,6 +743,7 @@ unsafe extern "C" fn jit_vm_call(
 }
 
 /// Define function in fn_table
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_define_function(
     name_idx: u64,
     fn_chunk_idx: u64,
@@ -716,6 +758,7 @@ unsafe extern "C" fn jit_define_function(
 }
 
 /// Free a global
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_free_global(idx: u64) {
     unsafe {
         let vm = &mut *get_jit_vm();
@@ -724,11 +767,13 @@ unsafe extern "C" fn jit_free_global(idx: u64) {
 }
 
 /// Throw (returns void; actual error handling is TODO)
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_recursion_overflow() { unsafe {
     let vm = &mut *get_jit_vm();
     vm.last_error = Some("maximum recursion depth exceeded (limit: 10000)".to_string());
 }}
 
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_throw(val: u64) -> u64 {
     {
         let v = Value::from_raw(val);
@@ -744,6 +789,7 @@ unsafe extern "C" fn jit_throw(val: u64) -> u64 {
 }
 
 /// ErrorCheck
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_error_check(slot: u64) -> u64 {
     unsafe {
         let vm = &*get_jit_vm();
@@ -756,6 +802,7 @@ unsafe extern "C" fn jit_error_check(slot: u64) -> u64 {
 }
 
 /// ErrorField
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_error_field(slot: u64) -> u64 {
     unsafe {
         let vm = &*get_jit_vm();
@@ -768,6 +815,7 @@ unsafe extern "C" fn jit_error_field(slot: u64) -> u64 {
 }
 
 /// SetErrorTolerant
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_set_error_tolerant(slot: u64) {
     unsafe {
         let vm = &mut *get_jit_vm();
@@ -776,6 +824,7 @@ unsafe extern "C" fn jit_set_error_tolerant(slot: u64) {
 }
 
 /// RecordError
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_record_error(slot: u64) {
     unsafe {
         let vm = &mut *get_jit_vm();
@@ -784,6 +833,7 @@ unsafe extern "C" fn jit_record_error(slot: u64) {
 }
 
 /// OptionalCheck
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_optional_check(slot: u64) -> u64 {
     unsafe {
         let vm = &*get_jit_vm();
@@ -796,6 +846,7 @@ unsafe extern "C" fn jit_optional_check(slot: u64) -> u64 {
 }
 
 /// GetDollarIndex
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_get_dollar_index(idx: u64) -> u64 {
     unsafe {
         let vm = &*get_jit_vm();
@@ -807,6 +858,7 @@ unsafe extern "C" fn jit_get_dollar_index(idx: u64) -> u64 {
 }
 
 /// GetDollarField
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_get_dollar_field(
     field_idx: u64,
 ) -> u64 {
@@ -823,6 +875,7 @@ unsafe extern "C" fn jit_get_dollar_field(
 }
 
 /// GetDollar
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_get_dollar() -> u64 {
     unsafe {
         let vm = &*get_jit_vm();
@@ -834,6 +887,7 @@ unsafe extern "C" fn jit_get_dollar() -> u64 {
 }
 
 /// PushSendCtx
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_push_send_ctx(val: u64) {
     unsafe {
         let vm = &mut *get_jit_vm();
@@ -845,6 +899,7 @@ unsafe extern "C" fn jit_push_send_ctx(val: u64) {
 }
 
 /// PopSendCtx
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_pop_send_ctx() {
     unsafe {
         let vm = &mut *get_jit_vm();
@@ -853,6 +908,7 @@ unsafe extern "C" fn jit_pop_send_ctx() {
 }
 
 /// Alias
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_alias(
     name_idx: u64,
     target_idx: u64,
@@ -868,6 +924,7 @@ unsafe extern "C" fn jit_alias(
 }
 
 /// Use
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_use(
     path_idx: u64,
     alias_idx: u64,
@@ -890,6 +947,7 @@ unsafe extern "C" fn jit_use(
 }
 
 /// Atomic wrap
+#[unsafe(no_mangle)]
 unsafe extern "C" fn jit_atomic(val: u64) -> u64 {
     {
         let v = Value::from_raw(val);

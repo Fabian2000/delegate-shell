@@ -28,6 +28,28 @@ fn main() {
         shell::mcp::run_mcp_server();
         return;
     }
+    if let Some(compile_idx) = raw_args.iter().position(|a| a == "--compile") {
+        if compile_idx + 1 >= raw_args.len() {
+            eprintln!("Usage: dgsh --compile <script.dgsh>");
+            std::process::exit(1);
+        }
+        let script = &raw_args[compile_idx + 1];
+        let source = match fs::read_to_string(script) {
+            Ok(content) => content,
+            Err(e) => {
+                eprintln!("Error reading '{}': {}", script, e);
+                std::process::exit(1);
+            }
+        };
+        match delegate_shell::aot::compile_to_binary(&source, script) {
+            Ok(path) => println!("Compiled to: {}", path),
+            Err(e) => {
+                eprintln!("Compilation error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     let args: Vec<String> = std::iter::once(raw_args[0].clone())
         .chain(raw_args.iter().skip(1).filter(|a| !a.starts_with("--")).cloned())
@@ -184,6 +206,7 @@ fn print_help() {
     eprintln!("  --vm            Force bytecode VM execution");
     eprintln!("  --jit           Force JIT compilation");
     eprintln!("  --tw            Force tree-walk interpretation");
+    eprintln!("  --compile <file> Compile script to standalone native binary");
     eprintln!("  --mcp           Start MCP server (Model Context Protocol over stdio)");
     eprintln!("  --version, -v   Show version");
     eprintln!("  --help, -h      Show this help");

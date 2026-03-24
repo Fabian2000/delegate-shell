@@ -335,4 +335,165 @@ impl Chunk {
         }
         0
     }
+
+    /// Serialize a chunk to bytes (for AOT embedding).
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        // name length + name
+        let name_bytes = self.name.as_bytes();
+        buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+        buf.extend_from_slice(name_bytes);
+        // param_count
+        buf.push(self.param_count);
+        // code length + code
+        buf.extend_from_slice(&(self.code.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&self.code);
+        // constants count + strings
+        buf.extend_from_slice(&(self.constants.strings.len() as u32).to_le_bytes());
+        for s in &self.constants.strings {
+            let sb = s.as_bytes();
+            buf.extend_from_slice(&(sb.len() as u32).to_le_bytes());
+            buf.extend_from_slice(sb);
+        }
+        // locals count + locals
+        buf.extend_from_slice(&(self.locals.len() as u32).to_le_bytes());
+        for local in &self.locals {
+            let lb = local.name.as_bytes();
+            buf.extend_from_slice(&(lb.len() as u32).to_le_bytes());
+            buf.extend_from_slice(lb);
+            buf.extend_from_slice(&local.slot.to_le_bytes());
+            buf.extend_from_slice(&local.depth.to_le_bytes());
+            buf.push(if local.is_dyn { 1 } else { 0 });
+        }
+        // global_slots count + entries
+        buf.extend_from_slice(&(self.global_slots.len() as u32).to_le_bytes());
+        for (name, &slot) in &self.global_slots {
+            let nb = name.as_bytes();
+            buf.extend_from_slice(&(nb.len() as u32).to_le_bytes());
+            buf.extend_from_slice(nb);
+            buf.extend_from_slice(&slot.to_le_bytes());
+        }
+        // global_names count + strings
+        buf.extend_from_slice(&(self.global_names.len() as u32).to_le_bytes());
+        for s in &self.global_names {
+            let sb = s.as_bytes();
+            buf.extend_from_slice(&(sb.len() as u32).to_le_bytes());
+            buf.extend_from_slice(sb);
+        }
+        buf
+    }
+
+    /// Deserialize a chunk from bytes. Returns (chunk, bytes_consumed).
+    pub fn deserialize(data: &[u8]) -> Option<(Self, usize)> {
+        let mut pos = 0;
+        let read_u32 = |data: &[u8], pos: &mut usize| -> Option<u32> {
+            if *pos + 4 > data.len() { return None; }
+            let val = u32::from_le_bytes([data[*pos], data[*pos+1], data[*pos+2], data[*pos+3]]);
+            *pos += 4;
+            Some(val)
+        };
+        let read_u16_fn = |data: &[u8], pos: &mut usize| -> Option<u16> {
+            if *pos + 2 > data.len() { return None; }
+            let val = u16::from_le_bytes([data[*pos], data[*pos+1]]);
+            *pos += 2;
+            Some(val)
+        };
+        let read_str = |data: &[u8], pos: &mut usize| -> Option<String> {
+            let len = read_u32(data, pos)? as usize;
+            if *pos + len > data.len() { return None; }
+            let s = std::str::from_utf8(&data[*pos..*pos+len]).ok()?.to_string();
+            *pos += len;
+            Some(s)
+        };
+
+        let name = read_str(data, &mut pos)?;
+        if pos >= data.len() { return None; }
+        let param_count = data[pos]; pos += 1;
+
+        // code
+        let code_len = read_u32(data, &mut pos)? as usize;
+        if pos + code_len > data.len() { return None; }
+        let code = data[pos..pos+code_len].to_vec();
+        pos += code_len;
+
+        // constants
+        let const_count = read_u32(data, &mut pos)? as usize;
+        let mut constants = ConstantPool::new();
+        for _ in 0..const_count {
+            let s = read_str(data, &mut pos)?;
+            constants.add(&s);
+        }
+
+        // locals
+        let local_count = read_u32(data, &mut pos)? as usize;
+        let mut locals = Vec::with_capacity(local_count);
+        for _ in 0..local_count {
+            let lname = read_str(data, &mut pos)?;
+            let slot = read_u16_fn(data, &mut pos)?;
+            let depth = read_u16_fn(data, &mut pos)?;
+            if pos >= data.len() { return None; }
+            let is_dyn = data[pos] != 0; pos += 1;
+            locals.push(LocalInfo { name: lname, slot, depth, is_dyn });
+        }
+
+        // global_slots
+        let gs_count = read_u32(data, &mut pos)? as usize;
+        let mut global_slots = HashMap::new();
+        for _ in 0..gs_count {
+            let gname = read_str(data, &mut pos)?;
+            let gslot = read_u16_fn(data, &mut pos)?;
+            global_slots.insert(gname, gslot);
+        }
+
+        // global_names
+        let gn_count = read_u32(data, &mut pos)? as usize;
+        let mut global_names = Vec::with_capacity(gn_count);
+        for _ in 0..gn_count {
+            let gns = read_str(data, &mut pos)?;
+            global_names.push(Rc::from(gns.as_str()));
+        }
+
+        let chunk = Self {
+            code,
+            constants,
+            locals,
+            line_map: Vec::new(), // not serialized for AOT
+            param_count,
+            name,
+            global_slots,
+            global_names,
+        };
+        Some((chunk, pos))
+    }
+}
+
+/// Serialize a vector of chunks to bytes.
+pub fn serialize_chunks(chunks: &[Chunk]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&(chunks.len() as u32).to_le_bytes());
+    for chunk in chunks {
+        let chunk_bytes = chunk.serialize();
+        buf.extend_from_slice(&(chunk_bytes.len() as u32).to_le_bytes());
+        buf.extend(chunk_bytes);
+    }
+    buf
+}
+
+/// Deserialize a vector of chunks from bytes.
+pub fn deserialize_chunks(data: &[u8]) -> Option<Vec<Chunk>> {
+    let mut pos = 0;
+    if data.len() < 4 { return None; }
+    let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    pos += 4;
+    let mut chunks = Vec::with_capacity(count);
+    for _ in 0..count {
+        if pos + 4 > data.len() { return None; }
+        let chunk_len = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+        pos += 4;
+        if pos + chunk_len > data.len() { return None; }
+        let (chunk, _consumed) = Chunk::deserialize(&data[pos..pos+chunk_len])?;
+        pos += chunk_len;
+        chunks.push(chunk);
+    }
+    Some(chunks)
 }

@@ -70,6 +70,18 @@ impl VM {
         }
     }
 
+    /// Initialize globals for AOT mode (without running the VM).
+    pub fn init_globals_for_aot(
+        &mut self,
+        num_globals: usize,
+        global_slots: &std::collections::HashMap<String, u16>,
+        global_names: &[std::rc::Rc<str>],
+    ) {
+        self.globals.resize(num_globals, Value::void());
+        self.global_names = global_names.to_vec();
+        self.global_name_to_slot = global_slots.clone();
+    }
+
     pub fn execute(&mut self, chunks: Vec<Chunk>, interp: &mut Runtime) -> Result<(), String> {
         let chunk_count = chunks.len();
         // Initialize global variable slots from the top-level chunk's metadata
@@ -487,14 +499,22 @@ impl VM {
                 Op::IncLocal => {
                     let slot = read_u16!() as usize;
                     let idx = base!() + slot;
-                    if let Some(n) = self.stack[idx].as_int() {
+                    if self.stack[idx].is_atomic() {
+                        if let Some(a) = self.stack[idx].as_atomic() {
+                            let _ = a.fetch_add(1);
+                        }
+                    } else if let Some(n) = self.stack[idx].as_int() {
                         self.stack[idx] = Value::int(n + 1);
                     }
                 }
                 Op::DecLocal => {
                     let slot = read_u16!() as usize;
                     let idx = base!() + slot;
-                    if let Some(n) = self.stack[idx].as_int() {
+                    if self.stack[idx].is_atomic() {
+                        if let Some(a) = self.stack[idx].as_atomic() {
+                            let _ = a.fetch_add(-1);
+                        }
+                    } else if let Some(n) = self.stack[idx].as_int() {
                         self.stack[idx] = Value::int(n - 1);
                     }
                 }
@@ -627,6 +647,11 @@ impl VM {
                         self.globals.resize(idx + 1, Value::void());
                     }
                     let val = self.stack.pop().ok_or("VM: stack underflow")?;
+                    // Atomic: fetch_add in generic_add already updated the value in-place.
+                    // Just drop the result and keep the existing atomic.
+                    if self.globals[idx].is_atomic() {
+                        continue;
+                    }
                     // Type check: prevent reassigning to incompatible type
                     let existing = &self.globals[idx];
                     if !existing.is_void() && existing.type_name() != val.type_name()
@@ -1399,6 +1424,13 @@ pub(crate) fn generic_add(mut a: Value, b: Value) -> Result<Value, String> {
                 return Ok(Value::string_owned(s));
             }
         }
+    // Atomic add: fetch_add in-place and return the atomic itself
+    if a.is_atomic() {
+        if let (Some(atomic), Some(n)) = (a.as_atomic(), b.as_int()) {
+            let _ = atomic.fetch_add(n);
+            return Ok(a);
+        }
+    }
     match (a.kind(), b.kind()) {
         (VK::Int(x), VK::Int(y)) => Ok(Value::int(x + y)),
         (VK::Float(x), VK::Float(y)) => Ok(Value::float(x + y)),
@@ -1415,6 +1447,12 @@ pub(crate) fn generic_add(mut a: Value, b: Value) -> Result<Value, String> {
 }
 
 pub(crate) fn generic_sub(a: Value, b: Value) -> Result<Value, String> {
+    if a.is_atomic() {
+        if let (Some(atomic), Some(n)) = (a.as_atomic(), b.as_int()) {
+            let _ = atomic.fetch_add(-n);
+            return Ok(a);
+        }
+    }
     match (a.kind(), b.kind()) {
         (VK::Int(x), VK::Int(y)) => Ok(Value::int(x - y)),
         (VK::Float(x), VK::Float(y)) => Ok(Value::float(x - y)),
