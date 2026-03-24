@@ -251,6 +251,9 @@ impl Lexer {
             "atomic" => Token::Atomic,
             "dyn" => Token::Dyn,
             "alias" => Token::Alias,
+            "teach" => Token::Teach,
+            "from" => Token::From,
+            "on" => Token::On,
             _ => Token::Ident(raw),
         };
 

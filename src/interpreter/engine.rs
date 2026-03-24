@@ -58,6 +58,8 @@ pub struct Runtime {
     allow_exec: bool,
     /// When true, network builtins (http_get, http_post, etc.) are available.
     allow_network: bool,
+    /// When true, teach keyword can load external libraries (dlopen/LoadLibrary)
+    allow_lib_load: bool,
     /// When true, executables run interactively (stdin/stdout/stderr inherited).
     pub(crate) interactive: bool,
     /// Current call depth for recursion limit
@@ -115,6 +117,7 @@ impl Runtime {
             has_executed: false,
             allow_exec: true,
             allow_network: true,
+            allow_lib_load: true,
             interactive: false,
             call_depth: 0,
             max_call_depth: 10000,
@@ -134,6 +137,7 @@ impl Runtime {
         let mut interp = Self::with_access(crate::builtins::registry::BuiltinAccess::Core)?;
         interp.allow_exec = false;
         interp.allow_network = false;
+        interp.allow_lib_load = false;
         Ok(interp)
     }
 
@@ -147,9 +151,19 @@ impl Runtime {
         self.allow_network = allow;
     }
 
+    /// Enable or disable external library loading via teach keyword.
+    pub fn set_allow_lib_load(&mut self, allow: bool) {
+        self.allow_lib_load = allow;
+    }
+
     /// Whether external exec is allowed.
     pub fn allow_exec(&self) -> bool {
         self.allow_exec
+    }
+
+    /// Whether external library loading is allowed.
+    pub fn allow_lib_load(&self) -> bool {
+        self.allow_lib_load
     }
 
     /// Set interactive mode for executables (stdin/stdout/stderr inherited).
@@ -341,6 +355,7 @@ impl Runtime {
             StmtKind::EnumDef { name, .. } => format!("enum {name}"),
             StmtKind::Match { .. } => "match".to_string(),
             StmtKind::Alias { name, target } => format!("alias {name} = {target}"),
+            StmtKind::Teach { name, library, .. } => format!("teach {name} from {library}"),
             StmtKind::Continue => "continue".to_string(),
             StmtKind::Break => "break".to_string(),
         }
@@ -571,6 +586,10 @@ impl Runtime {
                 }
                 self.env.aliases.insert(name.to_string(), target.clone());
                 Ok(FlowSignal::None)
+            }
+
+            StmtKind::Teach { return_type, name, params, library, platform, alias } => {
+                self.exec_teach(return_type, name, params, library, platform.as_deref(), alias.as_deref())
             }
         }
     }
@@ -858,6 +877,169 @@ impl Runtime {
             return Err(format!("use '{path}': path does not exist"));
         }
         Ok(FlowSignal::None)
+    }
+
+    fn exec_teach(
+        &mut self,
+        return_type: &crate::parser::ast::TeachType,
+        name: &str,
+        params: &[(String, crate::parser::ast::TeachType)],
+        library: &str,
+        platform: Option<&str>,
+        alias: Option<&str>,
+    ) -> Result<FlowSignal, String> {
+        use crate::parser::ast::TeachType;
+
+        if !self.allow_lib_load {
+            return Err("teach: external library loading is disabled".to_string());
+        }
+
+        // Check platform filter
+        if let Some(plat) = platform {
+            let current = if cfg!(target_os = "linux") { "linux" }
+                else if cfg!(target_os = "macos") { "macos" }
+                else if cfg!(target_os = "windows") { "windows" }
+                else { "unknown" };
+            if plat != current {
+                return Ok(FlowSignal::None); // skip, not this platform
+            }
+        }
+
+        let call_name = alias.unwrap_or(name).to_string();
+
+        // Check for duplicates
+        if self.env.taught_fns.contains_key(&call_name) {
+            return Err(format!("teach: '{call_name}' is already taught"));
+        }
+
+        // Load library (cache it)
+        let lib = if let Some(lib) = self.env.loaded_libs.get(library) {
+            lib.clone()
+        } else {
+            let loaded = unsafe { libloading::Library::new(library) }
+                .map_err(|e| format!("teach: cannot load library '{library}': {e}"))?;
+            let arc = std::sync::Arc::new(loaded);
+            self.env.loaded_libs.insert(library.to_string(), arc.clone());
+            arc
+        };
+
+        // Verify symbol exists
+        unsafe {
+            let _: libloading::Symbol<unsafe extern "C" fn()> = lib.get(name.as_bytes())
+                .map_err(|e| format!("teach: symbol '{name}' not found in '{library}': {e}"))?;
+        }
+
+        // Store taught function
+        self.env.taught_fns.insert(call_name.clone(), crate::interpreter::env::TaughtFn {
+            name: name.to_string(),
+            call_name,
+            return_type: return_type.clone(),
+            params: params.to_vec(),
+            library: lib,
+            symbol_name: name.to_string(),
+        });
+
+        Ok(FlowSignal::None)
+    }
+
+    /// Call a taught (FFI) function
+    pub fn call_taught(&mut self, name: &str, args: &[Value]) -> Result<Value, String> {
+        use crate::parser::ast::TeachType;
+
+        let taught = self.env.taught_fns.get(name)
+            .ok_or_else(|| format!("Taught function '{name}' not found"))?
+            .clone();
+
+        if args.len() != taught.params.len() {
+            return Err(format!("{}() expects {} arg(s), got {}", name, taught.params.len(), args.len()));
+        }
+
+        // Marshal args to C types and call
+        // We use a simple approach: cast to fn pointers based on param count
+        // All integer-sized types (int, handle) pass as i64
+        // Floats pass as f64
+        // Strings pass as *const c_char (temporary CString)
+        let mut c_strings: Vec<std::ffi::CString> = Vec::new();
+        let mut raw_args: Vec<u64> = Vec::new();
+
+        for (i, (_, ptype)) in taught.params.iter().enumerate() {
+            match ptype {
+                TeachType::Int => {
+                    let n = args[i].as_int().ok_or_else(|| format!("{}() arg {} expects int, got {}", name, i+1, args[i].type_name()))?;
+                    raw_args.push(n as u64);
+                }
+                TeachType::Float => {
+                    let f = args[i].as_float().ok_or_else(|| format!("{}() arg {} expects float, got {}", name, i+1, args[i].type_name()))?;
+                    raw_args.push(f.to_bits());
+                }
+                TeachType::String => {
+                    let s = args[i].as_str_ref().ok_or_else(|| format!("{}() arg {} expects string, got {}", name, i+1, args[i].type_name()))?;
+                    let cs = std::ffi::CString::new(s).map_err(|_| format!("{}() arg {} contains null byte", name, i+1))?;
+                    raw_args.push(cs.as_ptr() as u64);
+                    c_strings.push(cs); // keep alive
+                }
+                TeachType::Handle => {
+                    let n = args[i].as_int().ok_or_else(|| format!("{}() arg {} expects handle (int), got {}", name, i+1, args[i].type_name()))?;
+                    raw_args.push(n as u64);
+                }
+                TeachType::Void => {
+                    return Err(format!("{}() arg {} cannot be void", name, i+1));
+                }
+            }
+        }
+
+        // Call the function via unsafe symbol lookup + transmute
+        let result_raw: u64 = unsafe {
+            match raw_args.len() {
+                0 => {
+                    let func: libloading::Symbol<unsafe extern "C" fn() -> u64> =
+                        taught.library.get(taught.symbol_name.as_bytes())
+                            .map_err(|e| format!("Symbol error: {e}"))?;
+                    func()
+                }
+                1 => {
+                    let func: libloading::Symbol<unsafe extern "C" fn(u64) -> u64> =
+                        taught.library.get(taught.symbol_name.as_bytes())
+                            .map_err(|e| format!("Symbol error: {e}"))?;
+                    func(raw_args[0])
+                }
+                2 => {
+                    let func: libloading::Symbol<unsafe extern "C" fn(u64, u64) -> u64> =
+                        taught.library.get(taught.symbol_name.as_bytes())
+                            .map_err(|e| format!("Symbol error: {e}"))?;
+                    func(raw_args[0], raw_args[1])
+                }
+                3 => {
+                    let func: libloading::Symbol<unsafe extern "C" fn(u64, u64, u64) -> u64> =
+                        taught.library.get(taught.symbol_name.as_bytes())
+                            .map_err(|e| format!("Symbol error: {e}"))?;
+                    func(raw_args[0], raw_args[1], raw_args[2])
+                }
+                4 => {
+                    let func: libloading::Symbol<unsafe extern "C" fn(u64, u64, u64, u64) -> u64> =
+                        taught.library.get(taught.symbol_name.as_bytes())
+                            .map_err(|e| format!("Symbol error: {e}"))?;
+                    func(raw_args[0], raw_args[1], raw_args[2], raw_args[3])
+                }
+                _ => return Err(format!("teach: too many parameters (max 4), got {}", raw_args.len())),
+            }
+        };
+
+        // Marshal return value
+        match taught.return_type {
+            TeachType::Void => Ok(Value::void()),
+            TeachType::Int => Ok(Value::int(result_raw as i64)),
+            TeachType::Float => Ok(Value::float(f64::from_bits(result_raw))),
+            TeachType::Handle => Ok(Value::int(result_raw as i64)),
+            TeachType::String => {
+                if result_raw == 0 {
+                    Ok(Value::string_from(""))
+                } else {
+                    let cstr = unsafe { std::ffi::CStr::from_ptr(result_raw as *const std::ffi::c_char) };
+                    Ok(Value::string_from(cstr.to_str().unwrap_or("")))
+                }
+            }
+        }
     }
 
     fn exec_match(&mut self, expr: &Expr, arms: &[crate::parser::ast::MatchArm]) -> Result<FlowSignal, String> {
@@ -1320,7 +1502,7 @@ impl Runtime {
 
         match resolution {
             Resolution::Normal => {
-                // alias → use_paths → exe → own → system
+                // alias → use_paths → exe → own → taught → builtin
                 if self.allow_exec {
                     let interactive = self.interactive;
                     if let Some(target) = self.env.aliases.get(name).cloned() {
@@ -1336,15 +1518,21 @@ impl Runtime {
                 if let Some(result) = self.call_user_fn(name, args.clone()) {
                     return result;
                 }
+                if self.env.taught_fns.contains_key(name) {
+                    return self.call_taught(name, &args);
+                }
                 if let Some(result) = self.call_builtin(name, &args) {
                     return result;
                 }
                 Err(format!("Undefined: '{name}' (not found as exe, function, or built-in)"))
             }
             Resolution::OwnFirst => {
-                // own → system
+                // own → taught → builtin
                 if let Some(result) = self.call_user_fn(name, args.clone()) {
                     return result;
+                }
+                if self.env.taught_fns.contains_key(name) {
+                    return self.call_taught(name, &args);
                 }
                 if let Some(result) = self.call_builtin(name, &args) {
                     return result;
@@ -1352,7 +1540,10 @@ impl Runtime {
                 Err(format!("Undefined: '{name}' (not found as function or built-in)"))
             }
             Resolution::SystemOnly => {
-                // system only
+                // taught → builtin
+                if self.env.taught_fns.contains_key(name) {
+                    return self.call_taught(name, &args);
+                }
                 if let Some(result) = self.call_builtin(name, &args) {
                     return result;
                 }

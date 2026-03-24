@@ -37,7 +37,7 @@ dgsh
 
 - **Typed scripting.** Variables are typed at first assignment. Type annotations, structural object typing, `dyn` for dynamic contexts.
 - **170+ built-in functions.** Collections, strings, math, file I/O, HTTP, JSON/YAML/TOML, hashing, threads, terminal styling, and more.
-- **Fast execution.** Bytecode VM with Cranelift JIT. Beats Python on most workloads, competitive with Node.js.
+- **Fast execution.** Bytecode VM with JIT compilation. Beats Python on most workloads, competitive with Node.js.
 - **Embeddable.** Use as a library with a clean API. Register custom functions, sandbox scripts, control execution modes.
 - **C-ABI FFI.** Call dgsh from C, Python, Zig, Go, or any language with C interop.
 - **MCP Server.** Built-in support for AI tools (Claude Code, Cursor) to execute, debug, and analyze scripts.

@@ -1,6 +1,18 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use crate::interpreter::value::{MaybeError, ObjectData};
-use crate::parser::ast::{Stmt, TypeAnnotation};
+use crate::parser::ast::{Stmt, TypeAnnotation, TeachType};
+
+/// A taught (FFI) function loaded from a shared library
+#[derive(Clone)]
+pub struct TaughtFn {
+    pub name: String,
+    pub call_name: String,
+    pub return_type: TeachType,
+    pub params: Vec<(String, TeachType)>,
+    pub library: Arc<libloading::Library>,
+    pub symbol_name: String,
+}
 
 /// A user-defined function
 #[derive(Debug, Clone)]
@@ -33,6 +45,10 @@ pub struct Environment {
     pub use_paths: HashMap<String, String>,
     /// Name aliases — maps a call name to its target executable string
     pub aliases: HashMap<String, String>,
+    /// Taught (FFI) functions from shared libraries
+    pub taught_fns: HashMap<String, TaughtFn>,
+    /// Loaded libraries — kept alive so symbols remain valid
+    pub loaded_libs: HashMap<String, Arc<libloading::Library>>,
 }
 
 impl Default for Environment {
@@ -49,6 +65,8 @@ impl Environment {
             functions: HashMap::new(),
             use_paths: HashMap::new(),
             aliases: HashMap::new(),
+            taught_fns: HashMap::new(),
+            loaded_libs: HashMap::new(),
         }
     }
 

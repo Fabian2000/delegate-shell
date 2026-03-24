@@ -306,6 +306,26 @@ pub enum StmtKind {
         name: String,
         target: String,
     },
+
+    /// teach return_type fn_name(params) from "lib" [on "platform"] [as "alias"]
+    Teach {
+        return_type: TeachType,
+        name: String,
+        params: Vec<(String, TeachType)>,
+        library: String,
+        platform: Option<String>,
+        alias: Option<String>,
+    },
+}
+
+/// Type used in teach declarations for FFI
+#[derive(Debug, Clone, PartialEq)]
+pub enum TeachType {
+    Void,
+    Int,
+    Float,
+    String,
+    Handle,
 }
 
 #[derive(Debug, Clone, PartialEq)]

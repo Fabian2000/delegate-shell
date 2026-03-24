@@ -226,6 +226,11 @@ impl Compiler {
                 self.chunk.code.extend_from_slice(&name_idx.to_le_bytes());
                 self.chunk.code.extend_from_slice(&target_idx.to_le_bytes());
             }
+
+            StmtKind::Teach { .. } => {
+                // Teach is handled by the tree-walk interpreter at load time.
+                // The VM delegates teach execution to the interpreter.
+            }
         }
         Ok(())
     }

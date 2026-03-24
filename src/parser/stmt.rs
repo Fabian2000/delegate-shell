@@ -109,6 +109,7 @@ impl<'a> StmtParser<'a> {
             Token::Enum => self.parse_enum(),
             Token::Match => self.parse_match(),
             Token::Alias => self.parse_alias(),
+            Token::Teach => self.parse_teach(),
             Token::Dyn => self.parse_dyn(),
             Token::Increment => {
                 // pre-increment: ++x
@@ -692,6 +693,130 @@ impl<'a> StmtParser<'a> {
             Err("Alias target must be a simple string literal".to_string())
         } else {
             Err(format!("Expected string after '=', got {:?}", self.peek_raw()))
+        }
+    }
+
+    fn parse_teach(&mut self) -> Result<Stmt, String> {
+        use crate::parser::ast::TeachType;
+        let span = self.peek_span();
+        self.advance(); // consume 'teach'
+
+        // Parse return type
+        let return_type = self.parse_teach_type()?;
+
+        // Parse function name
+        let name = if let Token::Ident(n) = self.peek_raw().clone() {
+            self.advance();
+            n
+        } else {
+            return Err(format!("Expected function name after teach type, got {:?}", self.peek_raw()));
+        };
+
+        // Parse parameters: (name: type, ...)
+        if *self.peek_raw() != Token::LParen {
+            return Err(format!("Expected '(' after function name in teach, got {:?}", self.peek_raw()));
+        }
+        self.advance(); // consume '('
+
+        let mut params = Vec::new();
+        while *self.peek_raw() != Token::RParen {
+            if !params.is_empty() {
+                if *self.peek_raw() != Token::Comma {
+                    return Err(format!("Expected ',' between teach parameters, got {:?}", self.peek_raw()));
+                }
+                self.advance(); // consume ','
+            }
+            let param_name = if let Token::Ident(pn) = self.peek_raw().clone() {
+                self.advance();
+                pn
+            } else {
+                return Err(format!("Expected parameter name, got {:?}", self.peek_raw()));
+            };
+            if *self.peek_raw() != Token::Colon {
+                return Err(format!("Expected ':' after parameter name in teach, got {:?}", self.peek_raw()));
+            }
+            self.advance(); // consume ':'
+            let param_type = self.parse_teach_type()?;
+            params.push((param_name, param_type));
+        }
+        self.advance(); // consume ')'
+
+        // Parse 'from "library"'
+        if *self.peek_raw() != Token::From {
+            return Err(format!("Expected 'from' after teach declaration, got {:?}", self.peek_raw()));
+        }
+        self.advance(); // consume 'from'
+
+        let library = if let Token::String(parts) = self.peek_raw().clone() {
+            self.advance();
+            if parts.len() == 1 {
+                if let crate::lexer::token::StringPart::Literal(lib) = &parts[0] {
+                    lib.clone()
+                } else {
+                    return Err("Library name must be a simple string literal".to_string());
+                }
+            } else {
+                return Err("Library name must be a simple string literal".to_string());
+            }
+        } else {
+            return Err(format!("Expected library string after 'from', got {:?}", self.peek_raw()));
+        };
+
+        // Optional: on "platform"
+        let platform = if *self.peek_raw() == Token::On {
+            self.advance(); // consume 'on'
+            if let Token::String(parts) = self.peek_raw().clone() {
+                self.advance();
+                if parts.len() == 1 {
+                    if let crate::lexer::token::StringPart::Literal(p) = &parts[0] {
+                        Some(p.clone())
+                    } else {
+                        return Err("Platform must be a simple string literal".to_string());
+                    }
+                } else {
+                    return Err("Platform must be a simple string literal".to_string());
+                }
+            } else {
+                return Err(format!("Expected platform string after 'on', got {:?}", self.peek_raw()));
+            }
+        } else {
+            None
+        };
+
+        // Optional: as "alias"
+        let alias = if *self.peek_raw() == Token::As {
+            self.advance(); // consume 'as'
+            if let Token::Ident(a) = self.peek_raw().clone() {
+                self.advance();
+                Some(a)
+            } else {
+                return Err(format!("Expected identifier after 'as', got {:?}", self.peek_raw()));
+            }
+        } else {
+            None
+        };
+
+        Ok(Stmt {
+            kind: StmtKind::Teach { return_type, name, params, library, platform, alias },
+            span,
+        })
+    }
+
+    fn parse_teach_type(&mut self) -> Result<crate::parser::ast::TeachType, String> {
+        use crate::parser::ast::TeachType;
+        if let Token::Ident(t) = self.peek_raw().clone() {
+            let tt = match t.as_str() {
+                "void" => TeachType::Void,
+                "int" => TeachType::Int,
+                "float" => TeachType::Float,
+                "string" => TeachType::String,
+                "handle" => TeachType::Handle,
+                _ => return Err(format!("Unknown teach type '{}'. Valid types: void, int, float, string, handle", t)),
+            };
+            self.advance();
+            Ok(tt)
+        } else {
+            Err(format!("Expected type name, got {:?}", self.peek_raw()))
         }
     }
 

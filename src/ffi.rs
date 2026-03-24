@@ -573,6 +573,16 @@ pub unsafe extern "C" fn dgsh_set_allow_network(engine: *mut DgshEngine, allow: 
     }
 }
 
+/// Enable or disable external library loading via teach keyword (default: enabled).
+/// # Safety
+/// `engine` must be a valid DgshEngine pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dgsh_set_allow_lib_load(engine: *mut DgshEngine, allow: i32) {
+    if !engine.is_null() {
+        unsafe { (*engine).interp.set_allow_lib_load(allow != 0) };
+    }
+}
+
 /// Create an engine with a specific builtin access level.
 /// 0 = All, 1 = Core, 2 = None. Returns null on failure.
 #[unsafe(no_mangle)]

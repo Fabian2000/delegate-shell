@@ -49,6 +49,9 @@ pub enum Token {
     Atomic,
     Alias,
     Dyn,
+    Teach,
+    From,
+    On,
     Not, // used contextually — parser handles !expr vs fn!()
 
     // Arithmetic
