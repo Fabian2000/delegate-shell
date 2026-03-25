@@ -90,12 +90,17 @@ fn main() {
     }
     if let Err(e) = engine.run_source(&source) {
         if let Some(code_str) = e.strip_prefix("\x00EXIT\x00") {
+            engine.fire_event("exit");
             let code: i32 = code_str.parse().unwrap_or(1);
             std::process::exit(code);
+        }
+        if CANCELLED.load(Ordering::Relaxed) {
+            engine.fire_event("cancel");
         }
         eprintln!("Runtime error: {e}");
         std::process::exit(1);
     }
+    engine.fire_event("exit");
 }
 
 fn make_engine(raw_args: &[String]) -> Runtime {

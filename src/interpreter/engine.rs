@@ -64,6 +64,8 @@ pub struct Runtime {
     pub(crate) is_unsafe: bool,
     /// When true, executables run interactively (stdin/stdout/stderr inherited).
     pub(crate) interactive: bool,
+    /// Event handlers registered via on_event()
+    pub event_handlers: std::collections::HashMap<String, Vec<Value>>,
     /// Current call depth for recursion limit
     call_depth: usize,
     /// Maximum allowed call depth
@@ -122,6 +124,7 @@ impl Runtime {
             allow_lib_load: true,
             is_unsafe: false,
             interactive: false,
+            event_handlers: std::collections::HashMap::new(),
             call_depth: 0,
             max_call_depth: 10000,
             debug_handler: None,
@@ -177,6 +180,15 @@ impl Runtime {
     /// Whether network access is allowed.
     pub fn allow_network(&self) -> bool {
         self.allow_network
+    }
+
+    /// Fire an event — calls all registered handlers for the given event name.
+    pub fn fire_event(&mut self, event: &str) {
+        if let Some(handlers) = self.event_handlers.get(event).cloned() {
+            for handler in &handlers {
+                let _ = self.call_lambda(handler, vec![]);
+            }
+        }
     }
 
     /// Set a debug handler. Called when `debugger()` is executed or when stepping.
