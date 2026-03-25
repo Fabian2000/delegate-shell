@@ -110,6 +110,7 @@ impl<'a> StmtParser<'a> {
             Token::Match => self.parse_match(),
             Token::Alias => self.parse_alias(),
             Token::Teach => self.parse_teach(),
+            Token::Unsafe => self.parse_unsafe_stmt(),
             Token::Dyn => self.parse_dyn(),
             Token::Increment => {
                 // pre-increment: ++x
@@ -701,45 +702,24 @@ impl<'a> StmtParser<'a> {
         let span = self.peek_span();
         self.advance(); // consume 'teach'
 
-        // Parse return type
-        let return_type = self.parse_teach_type()?;
-
-        // Parse function name
-        let name = if let Token::Ident(n) = self.peek_raw().clone() {
+        // teach "C signature" from "library" [on "platform"] [as alias]
+        let c_sig = if let Token::String(parts) = self.peek_raw().clone() {
             self.advance();
-            n
+            if parts.len() == 1 {
+                if let crate::lexer::token::StringPart::Literal(s) = &parts[0] {
+                    s.clone()
+                } else {
+                    return Err("teach signature must be a plain string".to_string());
+                }
+            } else {
+                return Err("teach signature must be a plain string".to_string());
+            }
         } else {
-            return Err(format!("Expected function name after teach type, got {:?}", self.peek_raw()));
+            return Err(format!("Expected C signature string after 'teach', got {:?}", self.peek_raw()));
         };
 
-        // Parse parameters: (name: type, ...)
-        if *self.peek_raw() != Token::LParen {
-            return Err(format!("Expected '(' after function name in teach, got {:?}", self.peek_raw()));
-        }
-        self.advance(); // consume '('
-
-        let mut params = Vec::new();
-        while *self.peek_raw() != Token::RParen {
-            if !params.is_empty() {
-                if *self.peek_raw() != Token::Comma {
-                    return Err(format!("Expected ',' between teach parameters, got {:?}", self.peek_raw()));
-                }
-                self.advance(); // consume ','
-            }
-            let param_name = if let Token::Ident(pn) = self.peek_raw().clone() {
-                self.advance();
-                pn
-            } else {
-                return Err(format!("Expected parameter name, got {:?}", self.peek_raw()));
-            };
-            if *self.peek_raw() != Token::Colon {
-                return Err(format!("Expected ':' after parameter name in teach, got {:?}", self.peek_raw()));
-            }
-            self.advance(); // consume ':'
-            let param_type = self.parse_teach_type()?;
-            params.push((param_name, param_type));
-        }
-        self.advance(); // consume ')'
+        // Parse the C signature string
+        let (return_type, name, params) = Self::parse_c_signature(&c_sig)?;
 
         // Parse 'from "library"'
         if *self.peek_raw() != Token::From {
@@ -800,6 +780,149 @@ impl<'a> StmtParser<'a> {
             kind: StmtKind::Teach { return_type, name, params, library, platform, alias },
             span,
         })
+    }
+
+    /// Parse a C function signature string like "int sqlite3_open(const char *filename, sqlite3 **ppDb)"
+    fn parse_c_signature(sig: &str) -> Result<(crate::parser::ast::TeachType, String, Vec<(String, crate::parser::ast::TeachType, bool)>), String> {
+        use crate::parser::ast::TeachType;
+        let sig = sig.trim();
+
+        // Find the opening parenthesis
+        let paren_pos = sig.find('(')
+            .ok_or_else(|| format!("Invalid C signature: missing '(' in '{sig}'"))?;
+        let close_paren = sig.rfind(')')
+            .ok_or_else(|| format!("Invalid C signature: missing ')' in '{sig}'"))?;
+
+        // Everything before '(' is "return_type name" or "return_type *name"
+        let before_paren = sig[..paren_pos].trim();
+        let params_str = sig[paren_pos + 1..close_paren].trim();
+
+        // Split return type and function name from before_paren
+        // Handle: "int func", "const char *func", "sqlite3 *func", "void func"
+        let (return_type, func_name) = Self::split_return_and_name(before_paren)?;
+
+        // Parse parameters
+        let mut params = Vec::new();
+        if !params_str.is_empty() && params_str != "void" {
+            for param_str in params_str.split(',') {
+                let param = param_str.trim();
+                if param.is_empty() { continue; }
+                // Skip function pointer params (callbacks) — treat as handle
+                if param.contains("(*)") || param.contains("(*") {
+                    params.push(("_callback".to_string(), TeachType::Handle, false));
+                    continue;
+                }
+                let (ptype, pname, is_output) = Self::parse_c_param(param)?;
+                params.push((pname, ptype, is_output));
+            }
+        }
+
+        Ok((return_type, func_name, params))
+    }
+
+    /// Split "const char *func_name" into (TeachType, "func_name")
+    fn split_return_and_name(s: &str) -> Result<(crate::parser::ast::TeachType, String), String> {
+        use crate::parser::ast::TeachType;
+        // Work backwards: last token is the name (possibly with * prefix)
+        let s = s.trim();
+
+        // Find the function name — last identifier
+        let mut name_start = s.len();
+        for (i, c) in s.char_indices().rev() {
+            if c.is_alphanumeric() || c == '_' {
+                name_start = i;
+            } else {
+                break;
+            }
+        }
+        let func_name = s[name_start..].trim().to_string();
+        let type_part = s[..name_start].trim().trim_end_matches('*').trim();
+        let has_pointer = s[..name_start].contains('*');
+
+        let base_type = Self::map_c_type(type_part);
+        if has_pointer {
+            // Return type is a pointer — could be string (char*) or handle
+            if type_part == "char" || type_part == "const char" {
+                Ok((TeachType::String, func_name))
+            } else {
+                Ok((TeachType::Handle, func_name))
+            }
+        } else {
+            Ok((base_type, func_name))
+        }
+    }
+
+    /// Parse a single C parameter like "const char *name" or "sqlite3 **ppDb" or "int n"
+    /// Returns (type, name, is_output)
+    fn parse_c_param(param: &str) -> Result<(crate::parser::ast::TeachType, String, bool), String> {
+        use crate::parser::ast::TeachType;
+        let param = param.trim();
+
+        // Count pointer stars
+        let star_count = param.chars().filter(|&c| c == '*').count();
+
+        // Remove stars and const
+        let clean = param.replace('*', " ").replace("const ", "");
+        let tokens: Vec<&str> = clean.split_whitespace().collect();
+
+        if tokens.is_empty() {
+            return Err("Empty parameter in teach signature".to_string());
+        }
+
+        // Last token is the name (or the type if unnamed like "int")
+        let (type_tokens, param_name) = if tokens.len() == 1 {
+            (&tokens[..1], format!("_p{}", 0))
+        } else {
+            (&tokens[..tokens.len() - 1], tokens[tokens.len() - 1].to_string())
+        };
+
+        let type_str = type_tokens.join(" ");
+        let base_type = Self::map_c_type(&type_str);
+
+        if star_count == 0 {
+            // Plain value — input parameter
+            Ok((base_type, param_name, false))
+        } else if star_count == 1 {
+            // Single pointer
+            match base_type {
+                TeachType::String => Ok((TeachType::String, param_name, false)), // char* → string input
+                TeachType::Void => Ok((TeachType::Handle, param_name, false)),   // void* → generic handle input
+                TeachType::Int | TeachType::Float => Ok((base_type, param_name, false)), // int*/double* → pass value
+                _ => Ok((TeachType::Handle, param_name, false)), // unknown* → typed handle input
+            }
+        } else {
+            // Double pointer (**) — output parameter: C writes into the pointed-to location
+            // The base type determines what gets written back:
+            // char** → string, int** → int, float/double** → float, unknown** → handle
+            let out_type = match base_type {
+                TeachType::String => TeachType::String,   // char** → output string
+                TeachType::Int => TeachType::Int,         // int** → output int
+                TeachType::Float => TeachType::Float,     // double** → output float
+                TeachType::Void => TeachType::Handle,     // void** → output handle
+                _ => TeachType::Handle,                   // unknown** → output handle
+            };
+            Ok((out_type, param_name, true))
+        }
+    }
+
+    /// Map a C type string to TeachType
+    fn map_c_type(s: &str) -> crate::parser::ast::TeachType {
+        use crate::parser::ast::TeachType;
+        match s.trim() {
+            "void" => TeachType::Void,
+            "int" | "long" | "long long" | "int64_t" | "size_t" | "ssize_t"
+            | "unsigned int" | "unsigned long" | "uint64_t" | "int32_t" | "uint32_t" => TeachType::Int,
+            "double" | "float" => TeachType::Float,
+            "char" | "const char" => TeachType::String,
+            _ => TeachType::Handle, // Unknown type → handle
+        }
+    }
+
+    fn parse_unsafe_stmt(&mut self) -> Result<Stmt, String> {
+        let span = self.peek_span();
+        self.advance(); // consume 'unsafe'
+        let inner = self.parse_stmt()?;
+        Ok(Stmt { kind: StmtKind::UnsafeStmt(Box::new(inner)), span })
     }
 
     fn parse_teach_type(&mut self) -> Result<crate::parser::ast::TeachType, String> {

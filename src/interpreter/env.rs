@@ -9,7 +9,8 @@ pub struct TaughtFn {
     pub name: String,
     pub call_name: String,
     pub return_type: TeachType,
-    pub params: Vec<(String, TeachType)>,
+    /// (param_name, param_type, is_output) — is_output=true for ** params
+    pub params: Vec<(String, TeachType, bool)>,
     pub library: Arc<libloading::Library>,
     pub symbol_name: String,
 }
@@ -49,6 +50,8 @@ pub struct Environment {
     pub taught_fns: HashMap<String, TaughtFn>,
     /// Loaded libraries — kept alive so symbols remain valid
     pub loaded_libs: HashMap<String, Arc<libloading::Library>>,
+    /// Variables assigned via ?= (error-tolerant) — tracked for correct ? check semantics
+    error_tolerant_vars: HashSet<String>,
 }
 
 impl Default for Environment {
@@ -67,7 +70,16 @@ impl Environment {
             aliases: HashMap::new(),
             taught_fns: HashMap::new(),
             loaded_libs: HashMap::new(),
+            error_tolerant_vars: HashSet::new(),
         }
+    }
+
+    pub fn mark_error_tolerant(&mut self, name: &str) {
+        self.error_tolerant_vars.insert(name.to_string());
+    }
+
+    pub fn is_error_tolerant_var(&self, name: &str) -> bool {
+        self.error_tolerant_vars.contains(name)
     }
 
     /// Return all visible variables as (name, value_display, type_name) tuples.

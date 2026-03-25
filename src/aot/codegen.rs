@@ -216,6 +216,16 @@ impl HelperRefs {
 ///
 /// Returns the raw bytes of the object file.
 pub fn compile_chunks_to_object(chunks: &[Chunk]) -> Result<Vec<u8>, String> {
+    // Check if the current architecture supports AOT compilation
+    let arch = std::env::consts::ARCH;
+    match arch {
+        "x86_64" | "aarch64" => {}
+        _ => return Err(format!(
+            "AOT compilation is not supported on '{}'. Supported architectures: x86_64, aarch64. Use --vm instead.",
+            arch
+        )),
+    }
+
     let mut flag_builder = settings::builder();
     let _ = flag_builder.set("use_colocated_libcalls", "false");
     let _ = flag_builder.set("is_pic", "false");
@@ -692,8 +702,20 @@ fn compile_chunk(
     }
 
     // Set the current chunk index for constant pool lookups
-    let ci = builder.ins().iconst(types::I64, chunk_idx as i64);
-    builder.ins().call(helpers.aot_set_chunk, &[ci]);
+    // Only set chunk index if this chunk accesses the constant pool
+    let needs_chunk_idx = chunk.code.iter().enumerate().any(|(i, &byte)| {
+        if i == 0 || i >= chunk.code.len() { return false; }
+        let op: Op = unsafe { std::mem::transmute(byte) };
+        matches!(op, Op::LoadConst | Op::FieldGet | Op::FieldSet | Op::MakeString
+            | Op::Call | Op::MakeObject | Op::MakeLambda | Op::ErrorField
+            | Op::GetGlobal | Op::SetGlobal | Op::Import | Op::Free
+            | Op::DefineFunction | Op::Alias | Op::Use | Op::OptionalCheck
+            | Op::GetDollarField | Op::ErrorCheck | Op::SetErrorTolerant | Op::RecordError)
+    });
+    if needs_chunk_idx {
+        let ci = builder.ins().iconst(types::I64, chunk_idx as i64);
+        builder.ins().call(helpers.aot_set_chunk, &[ci]);
+    }
 
     builder.seal_block(entry);
 
@@ -1205,18 +1227,20 @@ fn compile_chunk(
                     args.push(cur_depth);
                     let call = builder.ins().call(self_ref, &args);
                     vstack.push(builder.inst_results(call)[0]);
-                    // Restore our chunk_idx after the call returns
-                    let ci = builder.ins().iconst(types::I64, chunk_idx as i64);
-                    builder.ins().call(helpers.aot_set_chunk, &[ci]);
+                    if needs_chunk_idx {
+                        let ci = builder.ins().iconst(types::I64, chunk_idx as i64);
+                        builder.ins().call(helpers.aot_set_chunk, &[ci]);
+                    }
                 } else if let Some(&target_ref) = chunk_refs.get(&target) {
                     // Direct call to another AOT-compiled function
                     let zero_depth = builder.ins().iconst(types::I64, 0);
                     args.push(zero_depth);
                     let call = builder.ins().call(target_ref, &args);
                     vstack.push(builder.inst_results(call)[0]);
-                    // Restore our chunk_idx after the call returns
-                    let ci = builder.ins().iconst(types::I64, chunk_idx as i64);
-                    builder.ins().call(helpers.aot_set_chunk, &[ci]);
+                    if needs_chunk_idx {
+                        let ci = builder.ins().iconst(types::I64, chunk_idx as i64);
+                        builder.ins().call(helpers.aot_set_chunk, &[ci]);
+                    }
                 } else {
                     // Fallback to VM call (should not happen in full AOT)
                     let target_val = builder.ins().iconst(types::I64, target as i64);

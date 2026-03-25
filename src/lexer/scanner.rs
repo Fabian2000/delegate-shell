@@ -248,12 +248,14 @@ impl Lexer {
             "break" => Token::Break,
             "true" => Token::Bool(true),
             "false" => Token::Bool(false),
+            "void" => Token::Void,
             "atomic" => Token::Atomic,
             "dyn" => Token::Dyn,
             "alias" => Token::Alias,
             "teach" => Token::Teach,
             "from" => Token::From,
             "on" => Token::On,
+            "unsafe" => Token::Unsafe,
             _ => Token::Ident(raw),
         };
 

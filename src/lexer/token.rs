@@ -23,8 +23,9 @@ pub enum Token {
     Float(f64),
     String(Vec<StringPart>),
     Bool(bool),
+    Void,
 
-    // Identifier (stored lowercase)
+    // Identifier
     Ident(String),
 
     // Keywords
@@ -52,6 +53,7 @@ pub enum Token {
     Teach,
     From,
     On,
+    Unsafe,
     Not, // used contextually — parser handles !expr vs fn!()
 
     // Arithmetic

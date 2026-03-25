@@ -231,6 +231,11 @@ impl Compiler {
                 // Teach is handled by the tree-walk interpreter at load time.
                 // The VM delegates teach execution to the interpreter.
             }
+
+            StmtKind::UnsafeStmt(inner) => {
+                // Compile the inner statement — unsafe is checked at runtime by call_taught
+                self.compile_stmt(inner)?;
+            }
         }
         Ok(())
     }
@@ -250,6 +255,9 @@ impl Compiler {
             }
             ExprKind::Bool(b) => {
                 self.chunk.emit(if *b { Op::LoadTrue } else { Op::LoadFalse }, line);
+            }
+            ExprKind::VoidLit => {
+                self.chunk.emit(Op::LoadVoid, line);
             }
             ExprKind::String(parts) => {
                 self.compile_string(parts, line)?;

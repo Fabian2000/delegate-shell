@@ -275,6 +275,11 @@ impl<'a> ExprParser<'a> {
                 Ok(Expr { kind: ExprKind::Bool(v), span })
             }
 
+            Token::Void => {
+                self.advance();
+                Ok(Expr { kind: ExprKind::VoidLit, span })
+            }
+
             Token::LBracket => self.parse_list_literal(span),
             Token::LBrace => self.parse_object_literal(span),
 

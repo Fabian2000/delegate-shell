@@ -96,6 +96,6 @@ fn is_type_name(name: &str) -> bool {
         name,
         "int" | "float" | "string" | "bool" | "list" | "object"
             | "void" | "ref" | "result" | "thread" | "bytes"
-            | "filehandle" | "atomic"
+            | "filehandle" | "atomic" | "handle"
     )
 }

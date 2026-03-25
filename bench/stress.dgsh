@@ -260,12 +260,12 @@ safe_div(a, b)
 
 result? = safe_div!(10, 0)
 if result?
-    println("unexpected")
-else
     println("caught division by zero")
+else
+    println("unexpected")
 
 result2? = safe_div!(10, 2)
-if result2?
+if !result2?
     println("10 / 2 = {result2}")
 
 # --- 12. Nested loop computation ---

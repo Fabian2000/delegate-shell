@@ -60,6 +60,8 @@ pub struct Runtime {
     allow_network: bool,
     /// When true, teach keyword can load external libraries (dlopen/LoadLibrary)
     allow_lib_load: bool,
+    /// When true, the current expression is in an unsafe context (can call taught functions)
+    pub(crate) is_unsafe: bool,
     /// When true, executables run interactively (stdin/stdout/stderr inherited).
     pub(crate) interactive: bool,
     /// Current call depth for recursion limit
@@ -118,6 +120,7 @@ impl Runtime {
             allow_exec: true,
             allow_network: true,
             allow_lib_load: true,
+            is_unsafe: false,
             interactive: false,
             call_depth: 0,
             max_call_depth: 10000,
@@ -356,6 +359,7 @@ impl Runtime {
             StmtKind::Match { .. } => "match".to_string(),
             StmtKind::Alias { name, target } => format!("alias {name} = {target}"),
             StmtKind::Teach { name, library, .. } => format!("teach {name} from {library}"),
+            StmtKind::UnsafeStmt(inner) => format!("unsafe {}", Self::describe_stmt(inner)),
             StmtKind::Continue => "continue".to_string(),
             StmtKind::Break => "break".to_string(),
         }
@@ -591,6 +595,14 @@ impl Runtime {
             StmtKind::Teach { return_type, name, params, library, platform, alias } => {
                 self.exec_teach(return_type, name, params, library, platform.as_deref(), alias.as_deref())
             }
+
+            StmtKind::UnsafeStmt(inner) => {
+                let prev = self.is_unsafe;
+                self.is_unsafe = true;
+                let result = self.exec_stmt(inner);
+                self.is_unsafe = prev;
+                result
+            }
         }
     }
 
@@ -634,7 +646,7 @@ impl Runtime {
     }
 
     fn exec_inc_dec(&mut self, name: &str, increment: bool) -> Result<FlowSignal, String> {
-        let current = self.get_var(name)?;
+        let current = self.get_var_raw(name)?;
         // Atomic: in-place mutation, don't replace the value
         if let Some(a) = current.as_atomic() {
             let delta = if increment { 1 } else { -1 };
@@ -657,7 +669,12 @@ impl Runtime {
 
     /// Post-increment/decrement: returns the OLD value, then mutates the variable.
     fn eval_post_inc_dec(&mut self, name: &str, increment: bool) -> Result<Value, String> {
-        let current = self.get_var(name)?;
+        let current = self.get_var_raw(name)?;
+        if let Some(a) = current.as_atomic() {
+            let delta = if increment { 1 } else { -1 };
+            let old = a.fetch_add(delta);
+            return Ok(Value::int(old));
+        }
         let new_val = Self::compute_inc_dec(&current, increment)?;
         self.env.set(name, MaybeError::Ok(new_val))?;
         Ok(current) // return OLD value
@@ -665,7 +682,12 @@ impl Runtime {
 
     /// Pre-increment/decrement: mutates the variable, then returns the NEW value.
     fn eval_pre_inc_dec(&mut self, name: &str, increment: bool) -> Result<Value, String> {
-        let current = self.get_var(name)?;
+        let current = self.get_var_raw(name)?;
+        if let Some(a) = current.as_atomic() {
+            let delta = if increment { 1 } else { -1 };
+            let old = a.fetch_add(delta);
+            return Ok(Value::int(old + delta));
+        }
         let new_val = Self::compute_inc_dec(&current, increment)?;
         self.env.set(name, MaybeError::Ok(new_val.clone()))?;
         Ok(new_val) // return NEW value
@@ -683,6 +705,7 @@ impl Runtime {
     fn exec_assign(&mut self, name: &str, error_tolerant: bool, type_ann: Option<&TypeAnnotation>, is_dyn: bool, expr: &Expr) -> Result<FlowSignal, String> {
         let result = self.eval_expr(expr);
         if error_tolerant {
+            self.env.mark_error_tolerant(name);
             match result {
                 Ok(val) => {
                     let val = if !is_dyn {
@@ -889,7 +912,7 @@ impl Runtime {
         &mut self,
         return_type: &crate::parser::ast::TeachType,
         name: &str,
-        params: &[(String, crate::parser::ast::TeachType)],
+        params: &[(String, crate::parser::ast::TeachType, bool)],
         library: &str,
         platform: Option<&str>,
         alias: Option<&str>,
@@ -952,41 +975,74 @@ impl Runtime {
     pub fn call_taught(&mut self, name: &str, args: &[Value]) -> Result<Value, String> {
         use crate::parser::ast::TeachType;
 
+        if !self.is_unsafe {
+            return Err(format!("Calling taught function '{name}()' requires 'unsafe'. Use: unsafe {name}(...)"));
+        }
+
         let taught = self.env.taught_fns.get(name)
             .ok_or_else(|| format!("Taught function '{name}' not found"))?
             .clone();
 
+        // Strict arg count check — all parameters must be provided (input only; output params are handled via eval_taught_call_with_outputs)
+        let input_count = taught.params.iter().filter(|(_, _, is_out)| !is_out).count();
+        let output_count = taught.params.len() - input_count;
+        if output_count > 0 {
+            return Err(format!(
+                "{}() has output parameters — call via variable assignment (e.g. unsafe {}(...))",
+                name, name
+            ));
+        }
         if args.len() != taught.params.len() {
             return Err(format!("{}() expects {} arg(s), got {}", name, taught.params.len(), args.len()));
         }
 
-        // Marshal args to C types and call
-        // We use a simple approach: cast to fn pointers based on param count
-        // All integer-sized types (int, handle) pass as i64
-        // Floats pass as f64
-        // Strings pass as *const c_char (temporary CString)
-        let mut c_strings: Vec<std::ffi::CString> = Vec::new();
-        let mut raw_args: Vec<u64> = Vec::new();
+        // Marshal args to C types via libffi — correct calling convention for all types
+        use libffi::middle::{Cif, Type as FfiType, Arg as FfiArg};
 
-        for (i, (_, ptype)) in taught.params.iter().enumerate() {
+        let mut c_strings: Vec<std::ffi::CString> = Vec::new();
+        let mut ffi_types: Vec<FfiType> = Vec::new();
+        let mut int_vals: Vec<i64> = Vec::new();
+        let mut float_vals: Vec<f64> = Vec::new();
+        let mut ptr_vals: Vec<u64> = Vec::new();
+
+        // Prepare argument storage
+        #[derive(Debug)]
+        enum ArgSlot { Int(usize), Float(usize), Ptr(usize) }
+        let mut slots: Vec<ArgSlot> = Vec::new();
+
+        for (i, (_, ptype, _)) in taught.params.iter().enumerate() {
             match ptype {
                 TeachType::Int => {
-                    let n = args[i].as_int().ok_or_else(|| format!("{}() arg {} expects int, got {}", name, i+1, args[i].type_name()))?;
-                    raw_args.push(n as u64);
+                    let n = if args[i].is_void() { 0i64 } else {
+                        args[i].as_int().ok_or_else(|| format!("{}() arg {} expects int, got {}", name, i+1, args[i].type_name()))?
+                    };
+                    slots.push(ArgSlot::Int(int_vals.len()));
+                    int_vals.push(n);
+                    ffi_types.push(FfiType::i64());
                 }
                 TeachType::Float => {
-                    let f = args[i].as_float().ok_or_else(|| format!("{}() arg {} expects float, got {}", name, i+1, args[i].type_name()))?;
-                    raw_args.push(f.to_bits());
+                    let f = if let Some(f) = args[i].as_float() { f }
+                        else if let Some(n) = args[i].as_int() { n as f64 }
+                        else { return Err(format!("{}() arg {} expects float, got {}", name, i+1, args[i].type_name())); };
+                    slots.push(ArgSlot::Float(float_vals.len()));
+                    float_vals.push(f);
+                    ffi_types.push(FfiType::f64());
                 }
                 TeachType::String => {
                     let s = args[i].as_str_ref().ok_or_else(|| format!("{}() arg {} expects string, got {}", name, i+1, args[i].type_name()))?;
                     let cs = std::ffi::CString::new(s).map_err(|_| format!("{}() arg {} contains null byte", name, i+1))?;
-                    raw_args.push(cs.as_ptr() as u64);
-                    c_strings.push(cs); // keep alive
+                    slots.push(ArgSlot::Ptr(ptr_vals.len()));
+                    ptr_vals.push(cs.as_ptr() as u64);
+                    c_strings.push(cs);
+                    ffi_types.push(FfiType::pointer());
                 }
                 TeachType::Handle => {
-                    let n = args[i].as_int().ok_or_else(|| format!("{}() arg {} expects handle (int), got {}", name, i+1, args[i].type_name()))?;
-                    raw_args.push(n as u64);
+                    let n = if args[i].is_void() { 0i64 } else {
+                        args[i].as_int().ok_or_else(|| format!("{}() arg {} expects handle (int) or void, got {}", name, i+1, args[i].type_name()))?
+                    };
+                    slots.push(ArgSlot::Ptr(ptr_vals.len()));
+                    ptr_vals.push(n as u64);
+                    ffi_types.push(FfiType::pointer());
                 }
                 TeachType::Void => {
                     return Err(format!("{}() arg {} cannot be void", name, i+1));
@@ -994,44 +1050,54 @@ impl Runtime {
             }
         }
 
-        // Call the function via unsafe symbol lookup + transmute
-        let result_raw: u64 = unsafe {
-            match raw_args.len() {
-                0 => {
-                    let func: libloading::Symbol<unsafe extern "C" fn() -> u64> =
-                        taught.library.get(taught.symbol_name.as_bytes())
-                            .map_err(|e| format!("Symbol error: {e}"))?;
-                    func()
-                }
-                1 => {
-                    let func: libloading::Symbol<unsafe extern "C" fn(u64) -> u64> =
-                        taught.library.get(taught.symbol_name.as_bytes())
-                            .map_err(|e| format!("Symbol error: {e}"))?;
-                    func(raw_args[0])
-                }
-                2 => {
-                    let func: libloading::Symbol<unsafe extern "C" fn(u64, u64) -> u64> =
-                        taught.library.get(taught.symbol_name.as_bytes())
-                            .map_err(|e| format!("Symbol error: {e}"))?;
-                    func(raw_args[0], raw_args[1])
-                }
-                3 => {
-                    let func: libloading::Symbol<unsafe extern "C" fn(u64, u64, u64) -> u64> =
-                        taught.library.get(taught.symbol_name.as_bytes())
-                            .map_err(|e| format!("Symbol error: {e}"))?;
-                    func(raw_args[0], raw_args[1], raw_args[2])
-                }
-                4 => {
-                    let func: libloading::Symbol<unsafe extern "C" fn(u64, u64, u64, u64) -> u64> =
-                        taught.library.get(taught.symbol_name.as_bytes())
-                            .map_err(|e| format!("Symbol error: {e}"))?;
-                    func(raw_args[0], raw_args[1], raw_args[2], raw_args[3])
-                }
-                _ => return Err(format!("teach: too many parameters (max 4), got {}", raw_args.len())),
+        // Build libffi args
+        let mut ffi_args: Vec<FfiArg> = Vec::new();
+        for slot in &slots {
+            match slot {
+                ArgSlot::Int(idx) => ffi_args.push(FfiArg::new(&int_vals[*idx])),
+                ArgSlot::Float(idx) => ffi_args.push(FfiArg::new(&float_vals[*idx])),
+                ArgSlot::Ptr(idx) => ffi_args.push(FfiArg::new(&ptr_vals[*idx])),
+            }
+        }
+
+        // Return type
+        let ret_ffi_type = match taught.return_type {
+            TeachType::Void => FfiType::void(),
+            TeachType::Int => FfiType::i64(),
+            TeachType::Float => FfiType::f64(),
+            TeachType::String | TeachType::Handle => FfiType::pointer(),
+        };
+
+        // Build CIF and call
+        let cif = Cif::new(ffi_types, ret_ffi_type);
+        let func_ptr: *const () = unsafe {
+            let sym: libloading::Symbol<*const ()> = taught.library.get(taught.symbol_name.as_bytes())
+                .map_err(|e| format!("Symbol error: {e}"))?;
+            *sym
+        };
+        let code_ptr = libffi::middle::CodePtr::from_ptr(func_ptr as *mut std::ffi::c_void);
+
+        // Call and interpret return value based on type
+        let result_raw: u64 = match taught.return_type {
+            TeachType::Void => {
+                unsafe { cif.call::<()>(code_ptr, &ffi_args) };
+                0
+            }
+            TeachType::Int => {
+                let r: i64 = unsafe { cif.call(code_ptr, &ffi_args) };
+                r as u64
+            }
+            TeachType::Float => {
+                let r: f64 = unsafe { cif.call(code_ptr, &ffi_args) };
+                r.to_bits()
+            }
+            TeachType::String | TeachType::Handle => {
+                let r: u64 = unsafe { cif.call(code_ptr, &ffi_args) };
+                r
             }
         };
 
-        // Marshal return value
+        // Return the C function's return value — no interpretation, no error handling
         match taught.return_type {
             TeachType::Void => Ok(Value::void()),
             TeachType::Int => Ok(Value::int(result_raw as i64)),
@@ -1124,6 +1190,7 @@ impl Runtime {
             ExprKind::Int(n) => Ok(Value::int(*n)),
             ExprKind::Float(n) => Ok(Value::float(*n)),
             ExprKind::Bool(b) => Ok(Value::bool(*b)),
+            ExprKind::VoidLit => Ok(Value::void()),
             ExprKind::String(parts) => self.eval_string_parts(parts),
             ExprKind::List(elements) => self.eval_list(elements),
             ExprKind::Object(fields) => self.eval_object(fields),
@@ -1281,11 +1348,240 @@ impl Runtime {
     }
 
     fn eval_call(&mut self, name: &str, resolution: Resolution, args: &[Expr]) -> Result<Value, String> {
+        // For taught functions with output parameters, we need variable names to write back to
+        if let Some(taught) = self.env.taught_fns.get(name).cloned() {
+            let has_output = taught.params.iter().any(|(_, _, is_out)| *is_out);
+            if has_output {
+                return self.eval_taught_call_with_outputs(name, &taught, args);
+            }
+        }
         let mut eval_args = Vec::with_capacity(args.len());
         for arg in args {
             eval_args.push(self.eval_expr(arg)?);
         }
         self.call_resolved(name, resolution, eval_args)
+    }
+
+    fn eval_taught_call_with_outputs(
+        &mut self,
+        name: &str,
+        taught: &crate::interpreter::env::TaughtFn,
+        args: &[Expr],
+    ) -> Result<Value, String> {
+        use crate::parser::ast::TeachType;
+
+        if !self.is_unsafe {
+            return Err(format!("Calling taught function '{name}()' requires 'unsafe'. Use: unsafe {name}(...)"));
+        }
+
+        let input_count = taught.params.iter().filter(|(_, _, is_out)| !is_out).count();
+        let output_count = taught.params.iter().filter(|(_, _, is_out)| *is_out).count();
+        let total_params = taught.params.len();
+
+        if args.len() != total_params {
+            return Err(format!(
+                "{}() expects {} arg(s) ({} input, {} output), got {}",
+                name, total_params, input_count, output_count, args.len()
+            ));
+        }
+
+        // Collect output variable names from the AST — must be Ident expressions or 0 (NULL)
+        let mut output_vars: Vec<(usize, Option<String>)> = Vec::new(); // (param_index, None=NULL)
+        for (i, (_, _, is_out)) in taught.params.iter().enumerate() {
+            if *is_out {
+                match &args[i].kind {
+                    crate::parser::ast::ExprKind::Int(0) => {
+                        output_vars.push((i, None)); // 0 = NULL, no writeback
+                    }
+                    crate::parser::ast::ExprKind::VoidLit => {
+                        output_vars.push((i, None)); // void = NULL, no writeback
+                    }
+                    crate::parser::ast::ExprKind::Ident(var_name) => {
+                        if self.env.get(var_name).is_none() {
+                            return Err(format!(
+                                "{}() arg {}: variable '{}' must be defined before use as output parameter",
+                                name, i + 1, var_name
+                            ));
+                        }
+                        output_vars.push((i, Some(var_name.clone())));
+                    }
+                    _ => return Err(format!(
+                        "{}() arg {} is an output parameter. Pass a variable name, 0, or void.",
+                        name, i + 1
+                    )),
+                }
+            }
+        }
+
+        // Evaluate input args
+        let mut input_values: Vec<(usize, Value)> = Vec::new();
+        for (i, (_, _, is_out)) in taught.params.iter().enumerate() {
+            if !is_out {
+                let val = self.eval_expr(&args[i])?;
+                input_values.push((i, val));
+            }
+        }
+
+        // Build arg list: inputs evaluated, outputs as u64 pointers (alloc slots)
+        // We need to call call_taught_raw which handles the actual FFI
+        // Pass both input values and output slot indices
+        let result = self.call_taught_with_output_slots(name, taught, &input_values, &output_vars)?;
+
+        // Write output values back to variables
+        for (_, var_name, out_val) in &result.1 {
+            self.env.set(var_name, MaybeError::Ok(out_val.clone()))?;
+        }
+
+        Ok(result.0)
+    }
+
+    /// Returns (return_value, [(param_index, var_name, written_value)])
+    fn call_taught_with_output_slots(
+        &mut self,
+        name: &str,
+        taught: &crate::interpreter::env::TaughtFn,
+        input_values: &[(usize, Value)],
+        output_vars: &[(usize, Option<String>)],
+    ) -> Result<(Value, Vec<(usize, String, Value)>), String> {
+        use crate::parser::ast::TeachType;
+
+        let mut c_strings: Vec<std::ffi::CString> = Vec::new();
+        // Output slots: one u64 per output param, zeroed
+        let mut output_slots: Vec<u64> = vec![0u64; output_vars.len()];
+        let mut raw_args: Vec<u64> = Vec::with_capacity(taught.params.len());
+
+        let mut out_slot_idx = 0usize;
+
+        for (i, (_, ptype, is_out)) in taught.params.iter().enumerate() {
+            if *is_out {
+                // Pass pointer to the output slot
+                let ptr = &mut output_slots[out_slot_idx] as *mut u64 as u64;
+                raw_args.push(ptr);
+                out_slot_idx += 1;
+            } else {
+                // Find the input value for this param index
+                let val = input_values.iter().find(|(idx, _)| *idx == i)
+                    .map(|(_, v)| v)
+                    .ok_or_else(|| format!("{}() missing input value for param {}", name, i + 1))?;
+                match ptype {
+                    TeachType::Int => {
+                        let n = val.as_int().ok_or_else(|| format!("{}() arg {} expects int, got {}", name, i+1, val.type_name()))?;
+                        raw_args.push(n as u64);
+                    }
+                    TeachType::Float => {
+                        let f = val.as_float().ok_or_else(|| format!("{}() arg {} expects float, got {}", name, i+1, val.type_name()))?;
+                        raw_args.push(f.to_bits());
+                    }
+                    TeachType::String => {
+                        let s = val.as_str_ref().ok_or_else(|| format!("{}() arg {} expects string, got {}", name, i+1, val.type_name()))?;
+                        let cs = std::ffi::CString::new(s).map_err(|_| format!("{}() arg {} contains null byte", name, i+1))?;
+                        raw_args.push(cs.as_ptr() as u64);
+                        c_strings.push(cs);
+                    }
+                    TeachType::Handle => {
+                        let n = if val.is_void() { 0i64 } else {
+                            val.as_int().ok_or_else(|| format!("{}() arg {} expects handle (int) or void, got {}", name, i+1, val.type_name()))?
+                        };
+                        raw_args.push(n as u64);
+                    }
+                    TeachType::Void => {
+                        return Err(format!("{}() arg {} cannot be void", name, i+1));
+                    }
+                }
+            }
+        }
+
+        let result_raw: u64 = unsafe {
+            match raw_args.len() {
+                0 => {
+                    let func: libloading::Symbol<unsafe extern "C" fn() -> u64> =
+                        taught.library.get(taught.symbol_name.as_bytes())
+                            .map_err(|e| format!("Symbol error: {e}"))?;
+                    func()
+                }
+                1 => {
+                    let func: libloading::Symbol<unsafe extern "C" fn(u64) -> u64> =
+                        taught.library.get(taught.symbol_name.as_bytes())
+                            .map_err(|e| format!("Symbol error: {e}"))?;
+                    func(raw_args[0])
+                }
+                2 => {
+                    let func: libloading::Symbol<unsafe extern "C" fn(u64, u64) -> u64> =
+                        taught.library.get(taught.symbol_name.as_bytes())
+                            .map_err(|e| format!("Symbol error: {e}"))?;
+                    func(raw_args[0], raw_args[1])
+                }
+                3 => {
+                    let func: libloading::Symbol<unsafe extern "C" fn(u64, u64, u64) -> u64> =
+                        taught.library.get(taught.symbol_name.as_bytes())
+                            .map_err(|e| format!("Symbol error: {e}"))?;
+                    func(raw_args[0], raw_args[1], raw_args[2])
+                }
+                4 => {
+                    let func: libloading::Symbol<unsafe extern "C" fn(u64, u64, u64, u64) -> u64> =
+                        taught.library.get(taught.symbol_name.as_bytes())
+                            .map_err(|e| format!("Symbol error: {e}"))?;
+                    func(raw_args[0], raw_args[1], raw_args[2], raw_args[3])
+                }
+                5 => {
+                    let func: libloading::Symbol<unsafe extern "C" fn(u64, u64, u64, u64, u64) -> u64> =
+                        taught.library.get(taught.symbol_name.as_bytes())
+                            .map_err(|e| format!("Symbol error: {e}"))?;
+                    func(raw_args[0], raw_args[1], raw_args[2], raw_args[3], raw_args[4])
+                }
+                6 => {
+                    let func: libloading::Symbol<unsafe extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64> =
+                        taught.library.get(taught.symbol_name.as_bytes())
+                            .map_err(|e| format!("Symbol error: {e}"))?;
+                    func(raw_args[0], raw_args[1], raw_args[2], raw_args[3], raw_args[4], raw_args[5])
+                }
+                _ => return Err(format!("teach: too many parameters (max 6), got {}", raw_args.len())),
+            }
+        };
+
+        let return_val = match taught.return_type {
+            TeachType::Void => Value::void(),
+            TeachType::Int => Value::int(result_raw as i64),
+            TeachType::Float => Value::float(f64::from_bits(result_raw)),
+            TeachType::Handle => Value::int(result_raw as i64),
+            TeachType::String => {
+                if result_raw == 0 {
+                    Value::string_from("")
+                } else {
+                    let cstr = unsafe { std::ffi::CStr::from_ptr(result_raw as *const std::ffi::c_char) };
+                    Value::string_from(cstr.to_str().unwrap_or(""))
+                }
+            }
+        };
+
+        // Read output slot values back (skip NULL outputs)
+        let mut written: Vec<(usize, String, Value)> = Vec::new();
+        for (slot_i, (param_i, var_name)) in output_vars.iter().enumerate() {
+            let var = match var_name {
+                Some(v) => v,
+                None => continue, // NULL — no writeback
+            };
+            let slot_val = output_slots[slot_i];
+            // slot_val is a pointer written by C (the ** was dereferenced once by passing &slot)
+            // For string **: slot_val is a char* — read the string from it
+            // For handle **: slot_val is a pointer — keep as int handle
+            let out_val = match &taught.params[*param_i].1 {
+                TeachType::String => {
+                    if slot_val == 0 {
+                        Value::string_from("")
+                    } else {
+                        let cstr = unsafe { std::ffi::CStr::from_ptr(slot_val as *const std::ffi::c_char) };
+                        Value::string_from(cstr.to_str().unwrap_or(""))
+                    }
+                }
+                TeachType::Int => Value::int(slot_val as i64),
+                TeachType::Float => Value::float(f64::from_bits(slot_val)),
+                _ => Value::int(slot_val as i64), // handles stay as int
+            };
+            written.push((*param_i, var.clone(), out_val));
+        }
+
+        Ok((return_val, written))
     }
 
     fn eval_index(&mut self, expr: &Expr, index: &Expr) -> Result<Value, String> {
@@ -1388,18 +1684,30 @@ impl Runtime {
 
     fn eval_error_check(&self, name: &str) -> Result<Value, String> {
         match self.env.get(name) {
-            Some(MaybeError::Ok(_)) => Ok(Value::bool(true)),
-            Some(MaybeError::Err(_)) => Ok(Value::bool(false)),
+            Some(MaybeError::Ok(_)) => Ok(Value::bool(false)),  // no error
+            Some(MaybeError::Err(_)) => Ok(Value::bool(true)),  // has error
             None => Err(format!("Undefined variable: '{name}'")),
         }
     }
 
     fn eval_optional_check(&self, name: &str) -> Result<Value, String> {
-        // <param> evaluates to true if the optional param was provided (not void), false otherwise.
         match self.env.get(name) {
-            Some(MaybeError::Ok(v)) if v.is_void() => Ok(Value::bool(false)),
-            Some(MaybeError::Ok(_)) => Ok(Value::bool(true)),
-            Some(MaybeError::Err(_)) => Ok(Value::bool(true)), // provided but error
+            Some(MaybeError::Err(_)) => Ok(Value::bool(true)), // error state → true
+            Some(MaybeError::Ok(v)) if v.is_void() => Ok(Value::bool(false)), // void → false
+            Some(MaybeError::Ok(_)) => {
+                // For ?= variables: Ok means no error → false
+                // For optional params: Ok(non-void) means provided → true
+                // Distinguish: ?= variables have been through error-tolerant assignment
+                // Check if it was error-tolerant by checking if the name ends with implicit tracking
+                // Simple heuristic: if the variable could hold an error (was assigned with ?=),
+                // MaybeError::Ok means no error → false. Otherwise it's an optional param → true.
+                // We check: was this variable EVER set via error-tolerant assignment?
+                if self.env.is_error_tolerant_var(name) {
+                    Ok(Value::bool(false)) // ?= variable, no error → false
+                } else {
+                    Ok(Value::bool(true)) // optional param, provided → true
+                }
+            }
             None => Err(format!("'<{name}>' used outside of a function that declares '{name}' as optional")),
         }
     }
@@ -1593,6 +1901,11 @@ impl Runtime {
         self.env.push_scope();
         // Bind required params: check annotation > inferred type (skip if dyn)
         for ((param, ann, is_dyn), val) in func.params.iter().zip(args.iter()) {
+            // Atomics are passed through as-is (shared reference), skip type checks
+            if val.is_atomic() {
+                self.env.set_local(param, MaybeError::Ok(val.clone()));
+                continue;
+            }
             let val = if !is_dyn {
                 if let Some(ann) = ann {
                     let widened = widen_if_needed(ann, val.clone());

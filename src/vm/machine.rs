@@ -1070,10 +1070,8 @@ impl VM {
                 // ============================================================
                 Op::ErrorCheck => {
                     let slot = read_u16!();
-                    let is_ok = self.ok_vars.contains(&slot) ||
-                        (!self.error_vars.contains_key(&slot) &&
-                         self.globals.get(slot as usize).is_some_and(|v| !v.is_void()));
-                    self.stack.push(Value::bool(is_ok));
+                    let has_error = self.error_vars.contains_key(&slot);
+                    self.stack.push(Value::bool(has_error));
                 }
                 Op::ErrorField => {
                     let slot = read_u16!();

@@ -81,6 +81,7 @@ pub enum ExprKind {
     Float(f64),
     String(Vec<StringPart>),
     Bool(bool),
+    VoidLit,
     List(Vec<Expr>),
     Object(Vec<(String, Expr)>),
 
@@ -301,17 +302,21 @@ pub enum StmtKind {
         arms: Vec<MatchArm>,
     },
 
+    /// unsafe wrapper — marks a statement as allowing taught function calls
+    UnsafeStmt(Box<Stmt>),
+
     /// alias name = "target" — maps a call name to an executable string
     Alias {
         name: String,
         target: String,
     },
 
-    /// teach return_type fn_name(params) from "lib" [on "platform"] [as "alias"]
+    /// teach "C signature" from "lib" [on "platform"] [as "alias"]
     Teach {
         return_type: TeachType,
         name: String,
-        params: Vec<(String, TeachType)>,
+        /// (param_name, param_type, is_output) — is_output=true for ** params
+        params: Vec<(String, TeachType, bool)>,
         library: String,
         platform: Option<String>,
         alias: Option<String>,
