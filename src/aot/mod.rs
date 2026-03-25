@@ -22,8 +22,14 @@ pub fn compile_to_binary(source: &str, script_path: &str) -> Result<String, Stri
     let chunks = Compiler::compile(&stmts)
         .map_err(|e| format!("Bytecode compilation error: {e}"))?;
 
-    // 4. Generate native code for ALL chunks via Cranelift ObjectModule
-    let object_bytes = codegen::compile_chunks_to_object(&chunks)?;
+    // 4. Extract teach statements from source for runtime init
+    let teach_lines: Vec<&str> = source.lines()
+        .filter(|l| l.trim_start().starts_with("teach "))
+        .collect();
+    let teach_source = teach_lines.join("\n");
+
+    // 5. Generate native code for ALL chunks via Cranelift ObjectModule
+    let object_bytes = codegen::compile_chunks_to_object(&chunks, &teach_source)?;
 
     // 5. Write object file to temp path
     let output_name = script_path

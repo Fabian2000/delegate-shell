@@ -67,7 +67,7 @@ impl Compiler {
 
     /// Get or create a global slot index for a variable name.
     fn global_slot(&mut self, name: &str) -> u16 {
-        let lower = name.to_ascii_lowercase();
+        let lower = name.to_string();
         if let Some(&slot) = self.global_slots.get(&lower) {
             slot
         } else {
@@ -632,7 +632,7 @@ impl Compiler {
             self.compile_expr(arg)?;
         }
         let argc = args.len() as u8;
-        let lower = name.to_ascii_lowercase();
+        let lower = name.to_string();
 
         // Direct call for known user functions
         if (resolution == Resolution::OwnFirst || resolution == Resolution::Normal)
@@ -659,7 +659,7 @@ impl Compiler {
 
     fn compile_fn_def(&mut self, name: &str, params: &[(String, Option<TypeAnnotation>, bool)], optional_params: &[(String, Option<TypeAnnotation>, bool)], body: &[Stmt], line: u32) -> Result<(), String> {
         let chunk_idx = self.chunks.len() as u16 + 1;
-        let lower = name.to_ascii_lowercase();
+        let lower = name.to_string();
         self.fn_chunks.insert(lower.clone(), chunk_idx);
 
         let total_params = params.len() + optional_params.len();
@@ -670,11 +670,11 @@ impl Compiler {
 
         // Required params as locals
         for (i, (pname, _, _)) in params.iter().enumerate() {
-            self.locals.push(Local { name: pname.to_ascii_lowercase(), slot: i as u16, depth: 0 });
+            self.locals.push(Local { name: pname.to_string(), slot: i as u16, depth: 0 });
         }
         // Optional params as locals (filled with Void if not provided)
         for (i, (pname, _, _)) in optional_params.iter().enumerate() {
-            self.locals.push(Local { name: pname.to_ascii_lowercase(), slot: (params.len() + i) as u16, depth: 0 });
+            self.locals.push(Local { name: pname.to_string(), slot: (params.len() + i) as u16, depth: 0 });
         }
 
         // Store total param info for the chunk
@@ -966,7 +966,7 @@ impl Compiler {
     // ===================================================================
 
     fn resolve_local(&self, name: &str) -> Option<u16> {
-        let lower = name.to_ascii_lowercase();
+        let lower = name.to_string();
         for local in self.locals.iter().rev() {
             if local.name == lower { return Some(local.slot); }
         }
@@ -974,7 +974,7 @@ impl Compiler {
     }
 
     fn add_local(&mut self, name: &str) -> u16 {
-        let lower = name.to_ascii_lowercase();
+        let lower = name.to_string();
         let slot = self.locals.len() as u16;
         self.locals.push(Local { name: lower, slot, depth: self.scope_depth });
         slot

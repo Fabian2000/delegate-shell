@@ -103,6 +103,7 @@ fn make_engine(raw_args: &[String]) -> Runtime {
         eprintln!("Failed to initialize: {e}");
         std::process::exit(1);
     });
+    shell::repl::register_shell_builtins(&mut engine);
     let is_debug = raw_args.iter().any(|a| a == "--debug");
     if is_debug {
         // Debug mode forces tree-walking for full stepping support

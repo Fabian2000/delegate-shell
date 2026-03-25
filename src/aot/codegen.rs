@@ -215,7 +215,7 @@ impl HelperRefs {
 /// Compile all bytecode chunks to a native object file (ELF/Mach-O/COFF).
 ///
 /// Returns the raw bytes of the object file.
-pub fn compile_chunks_to_object(chunks: &[Chunk]) -> Result<Vec<u8>, String> {
+pub fn compile_chunks_to_object(chunks: &[Chunk], teach_source: &str) -> Result<Vec<u8>, String> {
     // Check if the current architecture supports AOT compilation
     let arch = std::env::consts::ARCH;
     match arch {
@@ -321,6 +321,22 @@ pub fn compile_chunks_to_object(chunks: &[Chunk]) -> Result<Vec<u8>, String> {
     len_desc.define(len_bytes.to_vec().into_boxed_slice());
     module.define_data(chunks_len_id, &len_desc)
         .map_err(|e| format!("Failed to define chunks length: {e}"))?;
+
+    // Embed teach source for runtime FFI initialization
+    let teach_data_id = module.declare_data("dgsh_teach_data", Linkage::Export, false, false)
+        .map_err(|e| format!("Failed to declare teach data: {e}"))?;
+    let mut teach_desc = DataDescription::new();
+    teach_desc.define(teach_source.as_bytes().to_vec().into_boxed_slice());
+    module.define_data(teach_data_id, &teach_desc)
+        .map_err(|e| format!("Failed to define teach data: {e}"))?;
+
+    let teach_len_id = module.declare_data("dgsh_teach_len", Linkage::Export, false, false)
+        .map_err(|e| format!("Failed to declare teach length: {e}"))?;
+    let teach_len_bytes = (teach_source.len() as u64).to_le_bytes();
+    let mut teach_len_desc = DataDescription::new();
+    teach_len_desc.define(teach_len_bytes.to_vec().into_boxed_slice());
+    module.define_data(teach_len_id, &teach_len_desc)
+        .map_err(|e| format!("Failed to define teach length: {e}"))?;
 
     // Generate `main` entry point
     generate_main(&mut module, &mut builder_ctx, chunk_func_ids[0], chunks_data_id, chunks_len_id)?;

@@ -482,7 +482,8 @@ unsafe extern "C" fn jit_generic_call(
                 std::mem::forget(val);
                 raw
             }
-            Err(_) => {
+            Err(e) => {
+                eprintln!("jit_generic_call error for '{}': {}", name, e);
                 let v = Value::void();
                 let raw = v.raw();
                 std::mem::forget(v);
