@@ -48,23 +48,6 @@ pub extern "C" fn dgsh_aot_init(chunks_data: *const u8, chunks_len: u64) -> *mut
     // AOT: unsafe is always allowed (checked at compile time)
     runtime.is_unsafe = true;
 
-    // Execute teach statements if embedded
-    {
-        unsafe extern "C" {
-            static dgsh_teach_data: u8;
-            static dgsh_teach_len: u64;
-        }
-        let teach_len = unsafe { dgsh_teach_len } as usize;
-        if teach_len > 0 {
-            let teach_bytes = unsafe { std::slice::from_raw_parts(&dgsh_teach_data, teach_len) };
-            if let Ok(teach_src) = std::str::from_utf8(teach_bytes) {
-                if let Err(e) = runtime.run_source(teach_src) {
-                    eprintln!("AOT teach init error: {e}");
-                }
-            }
-        }
-    }
-
     // Create context FIRST, then take stable pointers from the heap-allocated boxes
     let ctx = Box::into_raw(Box::new(AotContext {
         _vm: vm,
@@ -81,6 +64,20 @@ pub extern "C" fn dgsh_aot_init(chunks_data: *const u8, chunks_len: u64) -> *mut
     }
 
     ctx as *mut std::ffi::c_void
+}
+
+/// Execute teach statements embedded in the AOT binary.
+/// Called by generated main after dgsh_aot_init.
+#[unsafe(no_mangle)]
+pub extern "C" fn dgsh_aot_teach_init(ctx: *mut std::ffi::c_void, teach_data: *const u8, teach_len: u64) {
+    if teach_len == 0 || teach_data.is_null() { return; }
+    let ctx = unsafe { &mut *(ctx as *mut AotContext) };
+    let teach_bytes = unsafe { std::slice::from_raw_parts(teach_data, teach_len as usize) };
+    if let Ok(teach_src) = std::str::from_utf8(teach_bytes) {
+        if let Err(e) = ctx._runtime.run_source(teach_src) {
+            eprintln!("AOT teach init error: {e}");
+        }
+    }
 }
 
 /// Set the current chunk index for constant pool lookups in JIT helpers.

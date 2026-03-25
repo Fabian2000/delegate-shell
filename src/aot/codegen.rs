@@ -339,7 +339,7 @@ pub fn compile_chunks_to_object(chunks: &[Chunk], teach_source: &str) -> Result<
         .map_err(|e| format!("Failed to define teach length: {e}"))?;
 
     // Generate `main` entry point
-    generate_main(&mut module, &mut builder_ctx, chunk_func_ids[0], chunks_data_id, chunks_len_id)?;
+    generate_main(&mut module, &mut builder_ctx, chunk_func_ids[0], chunks_data_id, chunks_len_id, teach_data_id, teach_len_id)?;
 
     let product = module.finish();
     let bytes = product.emit()
@@ -361,6 +361,8 @@ fn generate_main(
     chunk0_id: cranelift_module::FuncId,
     chunks_data_id: cranelift_module::DataId,
     chunks_len_id: cranelift_module::DataId,
+    teach_data_id: cranelift_module::DataId,
+    teach_len_id: cranelift_module::DataId,
 ) -> Result<(), String> {
     let i64t = types::I64;
 
@@ -397,9 +399,23 @@ fn generate_main(
     // Declare chunk_0 reference
     let chunk0_ref = module.declare_func_in_func(chunk0_id, &mut func);
 
+    // Declare teach_init: (i64, i64, i64) -> void (ctx, teach_data, teach_len)
+    let teach_init_sig = {
+        let mut s = module.make_signature();
+        s.params.push(AbiParam::new(i64t)); // ctx pointer
+        s.params.push(AbiParam::new(i64t)); // teach data pointer
+        s.params.push(AbiParam::new(i64t)); // teach data length
+        s
+    };
+    let teach_init_id = module.declare_function("dgsh_aot_teach_init", Linkage::Import, &teach_init_sig)
+        .map_err(|e| format!("Failed to declare dgsh_aot_teach_init: {e}"))?;
+    let teach_init_ref = module.declare_func_in_func(teach_init_id, &mut func);
+
     // Declare data references
     let data_gv = module.declare_data_in_func(chunks_data_id, &mut func);
     let len_gv = module.declare_data_in_func(chunks_len_id, &mut func);
+    let teach_data_gv = module.declare_data_in_func(teach_data_id, &mut func);
+    let teach_len_gv = module.declare_data_in_func(teach_len_id, &mut func);
 
     let mut builder = FunctionBuilder::new(&mut func, builder_ctx);
     let entry = builder.create_block();
@@ -417,7 +433,13 @@ fn generate_main(
     let init_call = builder.ins().call(init_ref, &[data_ptr, data_len]);
     let ctx_ptr = builder.inst_results(init_call)[0];
 
-    // 2. Call chunk_0 (top-level code, no params)
+    // 2. Call teach_init with teach data
+    let teach_ptr = builder.ins().symbol_value(types::I64, teach_data_gv);
+    let teach_len_ptr = builder.ins().symbol_value(types::I64, teach_len_gv);
+    let teach_len_val = builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), teach_len_ptr, 0);
+    builder.ins().call(teach_init_ref, &[ctx_ptr, teach_ptr, teach_len_val]);
+
+    // 3. Call chunk_0 (top-level code, no params)
     let _top_call = builder.ins().call(chunk0_ref, &[]);
 
     // 3. Call cleanup
