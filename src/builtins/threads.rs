@@ -24,6 +24,11 @@ fn builtin_thread(args: &[Value], interp: &mut Runtime) -> Result<Value, String>
     // Clone user functions so the thread has its own copy
     let user_fns = interp.env.clone_fns();
 
+    // In AOT (and JIT) mode, user functions live as VM-compiled chunks rather
+    // than AST entries — capture a snapshot here so the worker can construct
+    // its own VM. None in pure tree-walk mode.
+    let vm_snapshot = crate::vm::jit::snapshot_vm_state();
+
     // Inherit sandbox flags and name mappings from parent interpreter
     let parent_allow_exec = interp.allow_exec();
     let parent_allow_network = interp.allow_network();
@@ -40,6 +45,25 @@ fn builtin_thread(args: &[Value], interp: &mut Runtime) -> Result<Value, String>
         thread_interp.env.restore_fns(user_fns);
         thread_interp.env.use_paths = parent_use_paths;
         thread_interp.env.aliases = parent_aliases;
+
+        // Build worker VM if we inherited an AOT/VM bytecode snapshot, and
+        // wire up the thread-local JIT context so callbacks resolve user fns.
+        // The Box keeps the VM alive for the duration of this closure.
+        let mut _worker_vm: Option<Box<crate::vm::machine::VM>> = None;
+        if let Some(snap) = vm_snapshot {
+            let mut vm = Box::new(crate::vm::machine::VM::new());
+            vm.chunks = snap.chunks;
+            for (name, idx) in snap.fn_table {
+                vm.register_fn(&name, idx);
+            }
+            unsafe {
+                let vm_ptr: *mut crate::vm::machine::VM = &mut *vm;
+                let interp_ptr: *mut Runtime = &mut thread_interp;
+                let chunks_ptr: *const Vec<crate::vm::bytecode::Chunk> = &vm.chunks;
+                crate::vm::jit::set_jit_context(vm_ptr, interp_ptr, chunks_ptr, 0);
+            }
+            _worker_vm = Some(vm);
+        }
 
         let call_args: Vec<Value> = sendable_args.into_iter().map(Value::from_sendable).collect();
         let resolution = match res_code {

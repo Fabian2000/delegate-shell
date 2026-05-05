@@ -1879,7 +1879,11 @@ impl Runtime {
     }
 
     fn call_user_fn(&mut self, name: &str, args: Vec<Value>) -> Option<Result<Value, String>> {
-        let func = self.env.get_fn(name)?.clone();
+        let Some(func) = self.env.get_fn(name).cloned() else {
+            // AOT/VM fallback: the function may be registered as a VM chunk
+            // (no AST), so let the VM execute it directly.
+            return crate::vm::jit::try_vm_call(name, args);
+        };
 
         if self.call_depth >= self.max_call_depth {
             return Some(Err(format!("maximum recursion depth exceeded (limit: {})", self.max_call_depth)));

@@ -45,6 +45,12 @@ pub extern "C" fn dgsh_aot_init(chunks_data: *const u8, chunks_len: u64) -> *mut
         vm.init_globals_for_aot(num_globals, &chunks[0].global_slots, &chunks[0].global_names);
     }
 
+    // Mirror chunks into the VM itself so that helpers which dispatch through
+    // `vm.run_frame` (e.g. user-function callbacks invoked from builtins) have
+    // access to the bytecode. The JIT_CHUNKS_PTR continues to point at the
+    // canonical copy in `_chunks`.
+    vm.chunks = (*chunks).clone();
+
     // AOT: unsafe is always allowed (checked at compile time)
     runtime.is_unsafe = true;
 

@@ -109,7 +109,11 @@ impl VM {
 
     #[inline(never)]
     fn run(&mut self, interp: &mut Runtime) -> Result<(), String> {
-        // Cache hot values in locals for the dispatch loop
+        // Cache hot values in locals for the dispatch loop.
+        // entry_depth lets nested run() invocations (e.g. via run_frame) return
+        // exactly when their own frame is gone, rather than draining the entire
+        // frame stack and trampling on an outer caller's state.
+        let entry_depth = self.frames.len();
         let mut frame_idx = self.frames.len() - 1;
 
         macro_rules! ip { () => { self.frames[frame_idx].ip } }
@@ -154,13 +158,16 @@ impl VM {
         }
 
         loop {
+            if self.frames.len() < entry_depth {
+                return Ok(());
+            }
             if ip!() >= code!().code.len() {
                 if self.frames.len() <= 1 {
                     return Ok(());
                 }
                 let old_base = base!();
                 self.frames.pop();
-                frame_idx -= 1;
+                frame_idx = self.frames.len() - 1;
                 self.stack.truncate(old_base);
                 self.stack.push(Value::void());
                 continue;
@@ -352,23 +359,23 @@ impl VM {
                     let old_base = base!();
                     self.frames.pop();
                     if self.call_depth > 0 { self.call_depth -= 1; }
-                    frame_idx -= 1;
                     self.stack.truncate(old_base);
-                    if self.frames.is_empty() {
+                    self.stack.push(val);
+                    if self.frames.len() < entry_depth {
                         return Ok(());
                     }
-                    self.stack.push(val);
+                    frame_idx = self.frames.len() - 1;
                 }
                 Op::ReturnVoid => {
                     let old_base = base!();
                     self.frames.pop();
                     if self.call_depth > 0 { self.call_depth -= 1; }
-                    if self.frames.is_empty() {
-                        return Ok(());
-                    }
-                    frame_idx -= 1;
                     self.stack.truncate(old_base);
                     self.stack.push(Value::void());
+                    if self.frames.len() < entry_depth {
+                        return Ok(());
+                    }
+                    frame_idx = self.frames.len() - 1;
                 }
 
                 // ============================================================
@@ -1321,6 +1328,10 @@ impl VM {
 
     pub(crate) fn fn_table_lookup(&self, name: &str) -> Option<&usize> {
         self.fn_table.get(name)
+    }
+
+    pub(crate) fn fn_table_snapshot(&self) -> std::collections::HashMap<String, usize> {
+        self.fn_table.clone()
     }
 
     pub(crate) fn register_fn(&mut self, name: &str, chunk_idx: usize) {

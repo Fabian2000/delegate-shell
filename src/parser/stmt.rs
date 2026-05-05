@@ -5,12 +5,15 @@ use crate::parser::expr::ExprParser;
 pub struct StmtParser<'a> {
     tokens: &'a [SpannedToken],
     pos: usize,
+    /// Accumulator for synthetic top-level function definitions produced by
+    /// inline lambda desugaring inside expressions.
+    synthetic_fns: Vec<Stmt>,
 }
 
 impl<'a> StmtParser<'a> {
     #[must_use]
     pub const fn new(tokens: &'a [SpannedToken]) -> Self {
-        Self { tokens, pos: 0 }
+        Self { tokens, pos: 0, synthetic_fns: Vec::new() }
     }
 
     fn peek(&self) -> &Token {
@@ -79,6 +82,13 @@ impl<'a> StmtParser<'a> {
                 break;
             }
             stmts.push(self.parse_stmt()?);
+        }
+        // Prepend desugared inline-lambda function definitions so they are
+        // registered before any code that references them.
+        if !self.synthetic_fns.is_empty() {
+            let mut out = std::mem::take(&mut self.synthetic_fns);
+            out.append(&mut stmts);
+            return Ok(out);
         }
         Ok(stmts)
     }
@@ -1093,6 +1103,7 @@ impl<'a> StmtParser<'a> {
         let mut ep = ExprParser::new(self.tokens, self.pos);
         let expr = ep.parse_expr(0)?;
         self.pos = ep.pos();
+        self.synthetic_fns.append(&mut ep.synthetic_fns);
         Ok(expr)
     }
 }

@@ -1,5 +1,13 @@
 use crate::lexer::token::{Token, SpannedToken, Span};
-use crate::parser::ast::{Expr, ExprKind, UnaryOp, DollarRef, BinOp, Resolution, StringPart};
+use crate::parser::ast::{Expr, ExprKind, UnaryOp, DollarRef, BinOp, Resolution, StringPart, Stmt, StmtKind};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static LAMBDA_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn next_lambda_name() -> String {
+    let n = LAMBDA_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("__lambda_{n}")
+}
 
 enum PostfixResult {
     Continue,
@@ -37,12 +45,16 @@ const fn infix_binding_power(op: &Token) -> Option<(u8, u8)> {
 pub struct ExprParser<'a> {
     tokens: &'a [SpannedToken],
     pos: usize,
+    /// Synthetic top-level function definitions produced by inline lambda
+    /// desugaring. The caller (StmtParser) drains this after each parse_expr
+    /// call and prepends them to the program.
+    pub synthetic_fns: Vec<Stmt>,
 }
 
 impl<'a> ExprParser<'a> {
     #[must_use]
     pub const fn new(tokens: &'a [SpannedToken], pos: usize) -> Self {
-        Self { tokens, pos }
+        Self { tokens, pos, synthetic_fns: Vec::new() }
     }
 
     #[must_use]
@@ -275,7 +287,7 @@ impl<'a> ExprParser<'a> {
             }
             Token::String(parts) => {
                 self.advance();
-                let ast_parts = convert_string_parts(&parts)?;
+                let ast_parts = convert_string_parts(&parts, &mut self.synthetic_fns)?;
                 Ok(Expr { kind: ExprKind::String(ast_parts), span })
             }
             Token::Bool(v) => {
@@ -435,6 +447,53 @@ impl<'a> ExprParser<'a> {
 
     fn parse_lambda(&mut self, span: Span) -> Result<Expr, String> {
         self.advance();
+
+        // Inline lambda: @(params) body_expr — desugared to a synthetic top-level
+        // function `__lambda_N(dyn p1, dyn p2, ...) { return body }` and replaced
+        // with a normal Lambda reference to that name.
+        if *self.peek() == Token::LParen {
+            self.advance();
+            self.skip_layout();
+            let mut params: Vec<(String, Option<crate::parser::ast::TypeAnnotation>, bool)> = Vec::new();
+            while *self.peek() != Token::RParen {
+                if let Token::Ident(pname) = self.peek().clone() {
+                    self.advance();
+                    params.push((pname, None, true)); // dyn
+                } else {
+                    return Err(format!("Expected parameter name in inline lambda, got {:?}", self.peek()));
+                }
+                self.skip_layout();
+                if *self.peek() == Token::Comma {
+                    self.advance();
+                    self.skip_layout();
+                }
+            }
+            self.expect(&Token::RParen)?;
+            let body_expr = self.parse_expr(0)?;
+            let body_span = body_expr.span;
+            let lambda_name = next_lambda_name();
+            let body_stmt = Stmt {
+                kind: StmtKind::Return { expr: Some(body_expr), is_dyn: true },
+                span: body_span,
+            };
+            let fn_def = Stmt {
+                kind: StmtKind::FnDef {
+                    name: lambda_name.clone(),
+                    params,
+                    optional_params: Vec::new(),
+                    return_type_ann: None,
+                    body: vec![body_stmt],
+                },
+                span,
+            };
+            self.synthetic_fns.push(fn_def);
+            let end = body_span.end;
+            return Ok(Expr {
+                kind: ExprKind::Lambda { name: lambda_name, resolution: Resolution::Normal, bound_args: Vec::new() },
+                span: Span { start: span.start, end },
+            });
+        }
+
         if let Token::Ident(name) = self.peek().clone() {
             self.advance();
             let (resolution, name) = parse_resolution_suffix(name, self);
@@ -537,7 +596,10 @@ fn parse_resolution_suffix(name: String, parser: &mut ExprParser) -> (Resolution
     }
 }
 
-fn convert_string_parts(parts: &[crate::lexer::token::StringPart]) -> Result<Vec<StringPart>, String> {
+fn convert_string_parts(
+    parts: &[crate::lexer::token::StringPart],
+    synthetic_fns: &mut Vec<Stmt>,
+) -> Result<Vec<StringPart>, String> {
     let mut result = Vec::new();
     for part in parts {
         match part {
@@ -547,6 +609,7 @@ fn convert_string_parts(parts: &[crate::lexer::token::StringPart]) -> Result<Vec
             crate::lexer::token::StringPart::Interpolation(tokens) => {
                 let mut ep = ExprParser::new(tokens, 0);
                 let expr = ep.parse_expr(0)?;
+                synthetic_fns.append(&mut ep.synthetic_fns);
                 result.push(StringPart::Expr(Box::new(expr)));
             }
         }

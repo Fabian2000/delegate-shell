@@ -54,6 +54,69 @@ pub fn set_jit_chunk_idx(idx: usize) {
     JIT_CHUNK_IDX.with(|c| c.set(idx));
 }
 
+/// Snapshot of the active VM's bytecode and function registry, used so a
+/// freshly spawned thread can construct its own isolated VM (per the language
+/// design: threads share nothing with the parent except atomics passed in).
+///
+/// `Chunk` contains `Rc<str>` constants (not `Send`), but the snapshot is a
+/// fresh deep clone of immutable bytecode. Sending it to a worker is safe
+/// because nothing in the parent will read or mutate this copy concurrently.
+pub struct VmSnapshot {
+    pub chunks: Vec<Chunk>,
+    pub fn_table: std::collections::HashMap<String, usize>,
+}
+// Safety: Rc<str> is not Send by default, but the chunks here are a private,
+// immutable clone — there are no other handles to these Rcs in the source
+// thread, so transferring ownership across threads cannot race.
+unsafe impl Send for VmSnapshot {}
+
+/// Returns `None` when no JIT/AOT context is active in the calling thread.
+pub fn snapshot_vm_state() -> Option<VmSnapshot> {
+    let vm_ptr = get_jit_vm();
+    if vm_ptr.is_null() {
+        return None;
+    }
+    unsafe {
+        let vm = &*vm_ptr;
+        if vm.chunks.is_empty() {
+            return None;
+        }
+        Some(VmSnapshot { chunks: vm.chunks.clone(), fn_table: vm.fn_table_snapshot() })
+    }
+}
+
+/// Look up a user function in the active VM's function table and execute it.
+///
+/// Used by the interpreter as a fallback in call_user_fn: in AOT mode user
+/// functions live as VM-compiled chunks (registered via Op::DefineFunction),
+/// not as AST entries in `env.functions`. When a builtin like filter calls
+/// back into a user function, the interpreter has no AST to walk, so it asks
+/// the VM to execute the chunk directly.
+///
+/// Returns `None` when no JIT/AOT context is active or the name is unknown.
+pub fn try_vm_call(name: &str, args: Vec<Value>) -> Option<Result<Value, String>> {
+    let vm_ptr = get_jit_vm();
+    let interp_ptr = get_jit_interp();
+    if vm_ptr.is_null() || interp_ptr.is_null() {
+        return None;
+    }
+    unsafe {
+        let vm = &mut *vm_ptr;
+        let fn_chunk = *vm.fn_table_lookup(name)?;
+        let interp = &mut *interp_ptr;
+        let base = vm.stack.len();
+        for arg in &args {
+            vm.stack.push(arg.clone());
+        }
+        vm.frames.push(super::machine::CallFrame {
+            chunk_idx: fn_chunk,
+            ip: 0,
+            base,
+        });
+        Some(vm.run_frame(interp))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // extern "C" helpers — called from JIT'd code
 // ---------------------------------------------------------------------------
