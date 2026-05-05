@@ -80,6 +80,14 @@ impl<'a> ExprParser<'a> {
         }
     }
 
+    /// Skip layout tokens (Newline, Indent, Dedent). Used inside bracket pairs
+    /// so that list/object/argument lists can span multiple lines.
+    fn skip_layout(&mut self) {
+        while matches!(self.peek(), Token::Newline | Token::Indent | Token::Dedent) {
+            self.pos += 1;
+        }
+    }
+
     /// Parses an expression with the given minimum binding power.
     ///
     /// # Errors
@@ -372,11 +380,14 @@ impl<'a> ExprParser<'a> {
 
     fn parse_list_literal(&mut self, span: Span) -> Result<Expr, String> {
         self.advance();
+        self.skip_layout();
         let mut elements = Vec::new();
         while *self.peek() != Token::RBracket {
             elements.push(self.parse_expr(0)?);
+            self.skip_layout();
             if *self.peek() == Token::Comma {
                 self.advance();
+                self.skip_layout();
             }
         }
         let end = self.peek_span().end;
@@ -389,6 +400,7 @@ impl<'a> ExprParser<'a> {
 
     fn parse_object_literal(&mut self, span: Span) -> Result<Expr, String> {
         self.advance();
+        self.skip_layout();
         let mut fields = Vec::new();
         while *self.peek() != Token::RBrace {
             if let Token::Ident(name) = self.peek().clone() {
@@ -407,8 +419,10 @@ impl<'a> ExprParser<'a> {
             } else {
                 return Err(format!("Expected field name in object, got {:?}", self.peek()));
             }
+            self.skip_layout();
             if *self.peek() == Token::Comma {
                 self.advance();
+                self.skip_layout();
             }
         }
         let end = self.peek_span().end;
@@ -427,10 +441,13 @@ impl<'a> ExprParser<'a> {
             let mut bound_args = Vec::new();
             if *self.peek() == Token::LParen {
                 self.advance();
+                self.skip_layout();
                 while *self.peek() != Token::RParen {
                     bound_args.push(self.parse_expr(0)?);
+                    self.skip_layout();
                     if *self.peek() == Token::Comma {
                         self.advance();
+                        self.skip_layout();
                     }
                 }
                 self.expect(&Token::RParen)?;
@@ -454,11 +471,14 @@ impl<'a> ExprParser<'a> {
         // Check if it's a function call
         if *self.peek() == Token::LParen {
             self.advance();
+            self.skip_layout();
             let mut args = Vec::new();
             while *self.peek() != Token::RParen {
                 args.push(self.parse_expr(0)?);
+                self.skip_layout();
                 if *self.peek() == Token::Comma {
                     self.advance();
+                    self.skip_layout();
                 }
             }
             let end = self.peek_span().end;
