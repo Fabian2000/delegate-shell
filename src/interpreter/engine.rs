@@ -741,6 +741,14 @@ impl Runtime {
             };
             let val = if !is_dyn {
                 if let Some(ann) = type_ann {
+                    // void + annotation → typed void (lock the type immediately)
+                    if val.is_void() {
+                        let code = Value::type_code_from_name(ann.type_name());
+                        if code != 0 {
+                            self.env.set_dyn(name, MaybeError::Ok(Value::typed_void(code)), is_dyn)?;
+                            return Ok(FlowSignal::None);
+                        }
+                    }
                     let val = widen_if_needed(ann, val);
                     check_type_annotation(ann, &val, name)?;
                     val
@@ -1049,11 +1057,12 @@ impl Runtime {
                     ffi_types.push(FfiType::pointer());
                 }
                 TeachType::Handle => {
-                    let n = if args[i].is_void() { 0i64 } else {
-                        args[i].as_int().ok_or_else(|| format!("{}() arg {} expects handle (int) or void, got {}", name, i+1, args[i].type_name()))?
-                    };
+                    let n = if args[i].is_void() { 0u64 }
+                        else if let Some(h) = args[i].as_handle() { h }
+                        else if let Some(n) = args[i].as_int() { n as u64 }
+                        else { return Err(format!("{}() arg {} expects handle or void, got {}", name, i+1, args[i].type_name())); };
                     slots.push(ArgSlot::Ptr(ptr_vals.len()));
-                    ptr_vals.push(n as u64);
+                    ptr_vals.push(n);
                     ffi_types.push(FfiType::pointer());
                 }
                 TeachType::Void => {
@@ -1114,7 +1123,7 @@ impl Runtime {
             TeachType::Void => Ok(Value::void()),
             TeachType::Int => Ok(Value::int(result_raw as i64)),
             TeachType::Float => Ok(Value::float(f64::from_bits(result_raw))),
-            TeachType::Handle => Ok(Value::int(result_raw as i64)),
+            TeachType::Handle => Ok(Value::handle(result_raw)),
             TeachType::String => {
                 if result_raw == 0 {
                     Ok(Value::string_from(""))
@@ -1491,10 +1500,11 @@ impl Runtime {
                         c_strings.push(cs);
                     }
                     TeachType::Handle => {
-                        let n = if val.is_void() { 0i64 } else {
-                            val.as_int().ok_or_else(|| format!("{}() arg {} expects handle (int) or void, got {}", name, i+1, val.type_name()))?
-                        };
-                        raw_args.push(n as u64);
+                        let n = if val.is_void() { 0u64 }
+                            else if let Some(h) = val.as_handle() { h }
+                            else if let Some(n) = val.as_int() { n as u64 }
+                            else { return Err(format!("{}() arg {} expects handle or void, got {}", name, i+1, val.type_name())); };
+                        raw_args.push(n);
                     }
                     TeachType::Void => {
                         return Err(format!("{}() arg {} cannot be void", name, i+1));
@@ -1555,7 +1565,7 @@ impl Runtime {
             TeachType::Void => Value::void(),
             TeachType::Int => Value::int(result_raw as i64),
             TeachType::Float => Value::float(f64::from_bits(result_raw)),
-            TeachType::Handle => Value::int(result_raw as i64),
+            TeachType::Handle => Value::handle(result_raw),
             TeachType::String => {
                 if result_raw == 0 {
                     Value::string_from("")
@@ -1588,7 +1598,8 @@ impl Runtime {
                 }
                 TeachType::Int => Value::int(slot_val as i64),
                 TeachType::Float => Value::float(f64::from_bits(slot_val)),
-                _ => Value::int(slot_val as i64), // handles stay as int
+                TeachType::Handle => Value::handle(slot_val),
+                _ => Value::int(slot_val as i64),
             };
             written.push((*param_i, var.clone(), out_val));
         }

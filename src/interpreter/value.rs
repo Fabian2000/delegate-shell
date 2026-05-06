@@ -46,6 +46,7 @@ const TAG_STRING: u64  = QNAN | (3 << 48);
 const TAG_LIST: u64    = QNAN | (4 << 48);
 const TAG_OBJECT: u64  = QNAN | (5 << 48);
 const TAG_BOXED: u64   = QNAN | (6 << 48);
+const TAG_HANDLE: u64  = QNAN | (7 << 48); // opaque C pointer (e.g. sqlite3*)
 
 const TAG_MASK: u64    = 0xFFFF_0000_0000_0000; // upper 16 bits
 const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF; // lower 48 bits
@@ -178,6 +179,7 @@ pub enum SendableValue {
     Lambda { name: String, resolution: u8, bound_args: Vec<Self> },
     CommandResult { status: i32, out: String, err: String },
     Bytes(Vec<u8>),
+    Handle(u64),
     Atomic(AtomicValue),
 }
 
@@ -239,6 +241,74 @@ impl Value {
     pub fn void() -> Self {
         Self(TAG_VOID)
     }
+
+    /// Typed void: null value that remembers its locked type.
+    /// `type_tag` matches the TAG constants shifted down: 0=int, 1=bool, ..., 7=handle.
+    #[inline]
+    pub fn typed_void(type_code: u64) -> Self {
+        Self(TAG_VOID | type_code)
+    }
+
+    /// If this is a typed void, return the locked type code (1-7). 0 = untyped void.
+    #[inline]
+    pub fn void_type_code(&self) -> u64 {
+        if self.tag() == TAG_VOID { self.0 & PAYLOAD_MASK } else { 0 }
+    }
+
+    /// Get the type code for this value (used to create typed voids on nulling).
+    /// 0 = void/unknown, 1 = int, 2 = float, 3 = bool, 4 = string,
+    /// 5 = list, 6 = object, 7 = handle. Returns 0 for void itself.
+    #[inline]
+    pub fn type_code(&self) -> u64 {
+        match self.tag() {
+            t if t == TAG_INT => 1,
+            t if t == TAG_VOID => 0,
+            t if t == TAG_STRING => 4,
+            t if t == TAG_LIST => 5,
+            t if t == TAG_OBJECT => 6,
+            t if t == TAG_HANDLE => 7,
+            t if t == TAG_BOOL => 3,
+            t if t == TAG_BOXED => {
+                // BigInt → int
+                if self.as_heap().is_some_and(|h| matches!(h, HeapValue::BigInt(_))) { 1 } else { 0 }
+            }
+            _ => 2, // float (anything not tagged is a raw f64)
+        }
+    }
+
+    /// Check if a type code matches this value's type.
+    #[inline]
+    pub fn matches_type_code(&self, code: u64) -> bool {
+        code == 0 || self.type_code() == code
+    }
+
+    /// Convert a type annotation name to a type code for typed_void.
+    pub fn type_code_from_name(name: &str) -> u64 {
+        match name {
+            "int" => 1,
+            "float" => 2,
+            "bool" => 3,
+            "string" => 4,
+            "list" => 5,
+            "object" => 6,
+            "handle" => 7,
+            _ => 0,
+        }
+    }
+
+    /// Opaque C handle (e.g. sqlite3*, custom struct pointers).
+    #[inline]
+    pub fn handle(ptr: u64) -> Self {
+        Self(TAG_HANDLE | (ptr & PAYLOAD_MASK))
+    }
+
+    #[inline]
+    pub fn as_handle(&self) -> Option<u64> {
+        if self.tag() == TAG_HANDLE { Some(self.0 & PAYLOAD_MASK) } else { None }
+    }
+
+    #[inline]
+    pub fn is_handle(&self) -> bool { self.tag() == TAG_HANDLE }
 
     #[inline]
     pub fn string(s: Rc<str>) -> Self {
@@ -358,7 +428,7 @@ impl Value {
     pub fn is_float(&self) -> bool {
         // It's a float if it's NOT one of our tagged patterns
         let tag = self.tag();
-        !(QNAN..=TAG_BOXED).contains(&tag)
+        !(QNAN..=TAG_HANDLE).contains(&tag)
     }
 
     #[inline]
@@ -600,6 +670,7 @@ impl Value {
             t if t == TAG_STRING => "string",
             t if t == TAG_LIST => "list",
             t if t == TAG_OBJECT => "object",
+            t if t == TAG_HANDLE => "handle",
             t if t == TAG_BOXED => {
                 match self.as_heap() {
                     Some(HeapValue::BigInt(_)) => "int",
@@ -689,6 +760,9 @@ impl Value {
         if let Some(b) = self.as_bytes_ref() {
             return SendableValue::Bytes(b.clone());
         }
+        if let Some(h) = self.as_handle() {
+            return SendableValue::Handle(h);
+        }
         if let Some(a) = self.as_atomic() {
             return SendableValue::Atomic(a.clone());
         }
@@ -709,6 +783,7 @@ impl Value {
             }),
             SendableValue::CommandResult { status, out, err } => Self::command_result(CommandResultData { status, out, err }),
             SendableValue::Bytes(b) => Self::bytes(b),
+            SendableValue::Handle(h) => Self::handle(h),
             SendableValue::Atomic(a) => Self::atomic(a),
         }
     }
@@ -841,6 +916,7 @@ impl fmt::Display for Value {
             }
             return write!(f, " }}");
         }
+        if let Some(h) = self.as_handle() { return write!(f, "<handle 0x{h:x}>"); }
         if self.tag() == TAG_BOXED {
             match self.as_heap() {
                 Some(HeapValue::Lambda(d)) => {

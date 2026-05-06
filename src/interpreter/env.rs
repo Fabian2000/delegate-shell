@@ -136,15 +136,41 @@ impl Environment {
                         a.store(new_val);
                         return Ok(());
                     }
-                // Type check: existing Ok value must match new Ok value's type
+                // Type check with nullable void semantics:
+                // - void(0) → X: first real value, sets type. OK.
+                // - void(N) → X: typed null, only accepts X matching code N.
+                // - X → void: nulling. Stores typed_void(X.type_code). OK.
+                // - X → X: same type. OK.
+                // - X → Y: different non-void types. ERROR.
                 if let (MaybeError::Ok(existing), MaybeError::Ok(new_val)) = (&slot, &value) {
-                    let old_type = existing.type_name();
-                    let new_type = new_val.type_name();
-                    if old_type != new_type && new_type != "atomic" {
-                        return Err(format!(
-                            "Type mismatch: variable '{name}' is {old_type}, cannot assign {new_type} (use 'free {name}' first)"
-                        ));
+                    use crate::interpreter::value::Value;
+                    let new_is_void = new_val.is_void();
+                    let old_is_void = existing.is_void();
+
+                    if !new_is_void && !old_is_void {
+                        // Non-void → non-void: must match types
+                        let old_type = existing.type_name();
+                        let new_type = new_val.type_name();
+                        if old_type != new_type && new_type != "atomic" {
+                            return Err(format!(
+                                "Type mismatch: variable '{name}' is {old_type}, cannot assign {new_type} (use 'free {name}' first)"
+                            ));
+                        }
+                    } else if old_is_void && !new_is_void {
+                        // void → non-void: check type lock
+                        let lock = existing.void_type_code();
+                        if lock != 0 && new_val.type_code() != lock {
+                            return Err(format!(
+                                "Type mismatch: variable '{name}' was previously typed, cannot assign {} (use 'free {name}' first)",
+                                new_val.type_name()
+                            ));
+                        }
+                    } else if !old_is_void && new_is_void {
+                        // X → void: convert to typed void (preserve type lock)
+                        *slot = MaybeError::Ok(Value::typed_void(existing.type_code()));
+                        return Ok(());
                     }
+                    // void → void: always OK (no-op)
                     // Structural check for objects: same fields with same types
                     if let (Some(old_ref), Some(new_ref)) = (existing.as_object_ref(), new_val.as_object_ref()) {
                         check_object_structure(name, &old_ref.borrow(), &new_ref.borrow())?;
