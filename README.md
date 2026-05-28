@@ -77,9 +77,9 @@ risky(x)
 
 result? = risky!(-5)
 if result?
-    println("OK: {result}")
-else
     println("Error: {result?.error}")
+else
+    println("OK: {result}")
 
 # Lambda and higher-order functions
 double(n)
