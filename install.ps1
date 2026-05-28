@@ -28,6 +28,25 @@ if (-not (Test-Path $installDir)) {
 Expand-Archive -Path $zipPath -DestinationPath $tmpDir -Force
 Move-Item -Path (Join-Path $tmpDir "dgsh.exe") -Destination (Join-Path $installDir "dgsh.exe") -Force
 
+# Install runtime library for AOT compilation (--compile)
+$libAsset = "libdelegate_shell-windows-x86_64.zip"
+$libUrl = "https://github.com/$repo/releases/download/$tag/$libAsset"
+$libZipPath = Join-Path $tmpDir $libAsset
+$libDir = "$env:LOCALAPPDATA\dgsh"
+
+try {
+    Invoke-WebRequest -Uri $libUrl -OutFile $libZipPath
+    if (Test-Path $libZipPath) {
+        if (-not (Test-Path $libDir)) {
+            New-Item -ItemType Directory -Path $libDir -Force | Out-Null
+        }
+        Expand-Archive -Path $libZipPath -DestinationPath $libDir -Force
+        Write-Host "AOT runtime library installed to $libDir"
+    }
+} catch {
+    # Library is optional, don't fail the install
+}
+
 Remove-Item -Recurse -Force $tmpDir
 
 # Add to PATH if not already there
