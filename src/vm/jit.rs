@@ -142,6 +142,38 @@ const BOP_SHR: u64 = 15;
 /// Generic binary op for ANY types. Takes ownership of both values.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn jit_binary_op(left: u64, right: u64, op_code: u64) -> u64 {
+    // String concat fast path: check raw tags before creating Values
+    const STR_TAG: u64 = 0x7FF8_0000_0000_0000 | (3 << 48); // TAG_STRING
+    const TMASK: u64 = 0xFFFF_0000_0000_0000;
+    if op_code == BOP_ADD && (left & TMASK) == STR_TAG && (right & TMASK) == STR_TAG {
+        let mut a = Value::from_raw(left);
+        let b = Value::from_raw(right);
+        if let Some(b_str) = b.as_str_ref() {
+            if a.try_string_append_in_place(b_str) {
+                let raw = a.raw();
+                std::mem::forget(a);
+                drop(b);
+                return raw;
+            }
+            if let Some(a_str) = a.as_str_ref() {
+                let mut s = String::with_capacity(a_str.len() + b_str.len());
+                s.push_str(a_str);
+                s.push_str(b_str);
+                let v = Value::string_owned(s);
+                let raw = v.raw();
+                std::mem::forget(v);
+                drop(a);
+                drop(b);
+                return raw;
+            }
+        }
+        let result = generic_add(a, b);
+        match result {
+            Ok(v) => { let raw = v.raw(); std::mem::forget(v); return raw; }
+            Err(_) => return Value::void().raw(),
+        }
+    }
+
     let l = Value::from_raw(left);
     let r = Value::from_raw(right);
 
@@ -153,7 +185,7 @@ unsafe extern "C" fn jit_binary_op(left: u64, right: u64, op_code: u64) -> u64 {
         let raw = v.raw(); std::mem::forget(v); return raw;
     }
 
-    // Bitwise ops — extract ints
+    // Bitwise ops
     if op_code >= BOP_BITAND {
         let ai = l.as_int(); let bi = r.as_int();
         drop(l); drop(r);
@@ -300,15 +332,26 @@ unsafe extern "C" fn jit_get_global(idx: u64) -> u64 {
     }
 }
 
+/// Take global variable (replace slot with void, giving sole ownership to caller).
+/// Used by AOT for the pattern `s = s + x` so string concat can mutate in-place.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn jit_take_global(idx: u64) -> u64 {
+    unsafe {
+        let vm = &mut *get_jit_vm();
+        let val = vm.take_global(idx as usize);
+        let raw = val.raw();
+        std::mem::forget(val);
+        raw
+    }
+}
+
 /// Set global variable
 #[unsafe(no_mangle)]
 unsafe extern "C" fn jit_set_global(idx: u64, val: u64) {
     unsafe {
         let vm = &mut *get_jit_vm();
-        let v = Value::from_raw(val);
-        let cloned = v.clone();
-        std::mem::forget(v);
-        vm.set_global(idx as usize, cloned);
+        let v = Value::from_raw(val); // takes ownership from raw bits
+        vm.set_global(idx as usize, v); // transfers ownership to global slot
     }
 }
 
@@ -1070,6 +1113,7 @@ const H_IS_TRUTHY: &str = "jit_is_truthy";
 const H_CLONE_VALUE: &str = "jit_clone_value";
 const H_DROP_VALUE: &str = "jit_drop_value";
 const H_GET_GLOBAL: &str = "jit_get_global";
+const H_TAKE_GLOBAL: &str = "jit_take_global";
 const H_SET_GLOBAL: &str = "jit_set_global";
 const H_FIELD_GET: &str = "jit_field_get";
 const H_FIELD_SET: &str = "jit_field_set";
@@ -1142,6 +1186,7 @@ impl JitManager {
                 builder.symbol(H_CLONE_VALUE, jit_clone_value as *const u8);
                 builder.symbol(H_DROP_VALUE, jit_drop_value as *const u8);
                 builder.symbol(H_GET_GLOBAL, jit_get_global as *const u8);
+                builder.symbol(H_TAKE_GLOBAL, jit_take_global as *const u8);
                 builder.symbol(H_SET_GLOBAL, jit_set_global as *const u8);
                 builder.symbol(H_FIELD_GET, jit_field_get as *const u8);
                 builder.symbol(H_FIELD_SET, jit_field_set as *const u8);

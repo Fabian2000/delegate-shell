@@ -25,6 +25,7 @@ const H_IS_TRUTHY: &str = "jit_is_truthy";
 const H_CLONE_VALUE: &str = "jit_clone_value";
 const H_DROP_VALUE: &str = "jit_drop_value";
 const H_GET_GLOBAL: &str = "jit_get_global";
+const H_TAKE_GLOBAL: &str = "jit_take_global";
 const H_SET_GLOBAL: &str = "jit_set_global";
 const H_FIELD_GET: &str = "jit_field_get";
 const H_FIELD_SET: &str = "jit_field_set";
@@ -142,6 +143,7 @@ struct HelperRefs {
     alias: cranelift_codegen::ir::FuncRef,
     use_fn: cranelift_codegen::ir::FuncRef,
     atomic: cranelift_codegen::ir::FuncRef,
+    take_global: cranelift_codegen::ir::FuncRef,
     aot_load_const: cranelift_codegen::ir::FuncRef,
     aot_set_chunk: cranelift_codegen::ir::FuncRef,
 }
@@ -169,6 +171,7 @@ impl HelperRefs {
             is_truthy: decl!(H_IS_TRUTHY, [i64t], [i64t]),
             clone_value: decl!(H_CLONE_VALUE, [i64t], [i64t]),
             get_global: decl!(H_GET_GLOBAL, [i64t], [i64t]),
+            take_global: decl!(H_TAKE_GLOBAL, [i64t], [i64t]),
             set_global: decl!(H_SET_GLOBAL, [i64t, i64t], []),
             field_get: decl!(H_FIELD_GET, [i64t, i64t], [i64t]),
             field_set: decl!(H_FIELD_SET, [i64t, i64t, i64t], []),
@@ -894,7 +897,21 @@ fn compile_chunk(
             Op::GetGlobal => {
                 let idx = chunk.read_u16(pc) as u64; pc += 2;
                 let idx_val = builder.ins().iconst(types::I64, idx as i64);
-                let call = builder.ins().call(helpers.get_global, &[idx_val]);
+                // Peephole: GetGlobal(N), <3 bytes>, Add, SetGlobal(N)
+                // Use take_global so string concat can mutate in-place (Rc == 1)
+                let use_take = {
+                    let rest = &chunk.code[pc..];
+                    // Need: 3 bytes (LoadConst/etc) + 1 byte (Add) + 3 bytes (SetGlobal+u16) = 7
+                    rest.len() >= 7
+                        && (rest[3] == Op::Add as u8 || rest[3] == Op::AddInt as u8)
+                        && rest[4] == Op::SetGlobal as u8
+                        && chunk.read_u16(pc + 5) as u64 == idx
+                };
+                let call = if use_take {
+                    builder.ins().call(helpers.take_global, &[idx_val])
+                } else {
+                    builder.ins().call(helpers.get_global, &[idx_val])
+                };
                 vstack.push(builder.inst_results(call)[0]);
             }
             Op::SetGlobal => {

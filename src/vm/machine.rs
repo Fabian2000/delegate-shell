@@ -1310,6 +1310,16 @@ impl VM {
         }
     }
 
+    /// Take a global, replacing the slot with void. Gives sole ownership (Rc == 1)
+    /// so string concat can mutate in-place.
+    pub(crate) fn take_global(&mut self, idx: usize) -> Value {
+        if idx < self.globals.len() {
+            std::mem::replace(&mut self.globals[idx], Value::void())
+        } else {
+            Value::void()
+        }
+    }
+
     pub(crate) fn set_global(&mut self, idx: usize, val: Value) {
         if idx >= self.globals.len() {
             self.globals.resize(idx + 1, Value::void());

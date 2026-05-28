@@ -32,6 +32,8 @@ case "$ARCH" in
 esac
 
 ASSET="dgsh-${OS_NAME}-${ARCH_NAME}.tar.gz"
+LIB_ASSET="libdelegate_shell-${OS_NAME}-${ARCH_NAME}.tar.gz"
+LIB_DIR="/usr/local/lib/dgsh"
 
 # Get latest release tag
 echo "Fetching latest release..."
@@ -66,6 +68,25 @@ else
 fi
 
 chmod +x "${INSTALL_DIR}/dgsh"
+
+# Install runtime library for AOT compilation (--compile)
+LIB_URL="https://github.com/${REPO}/releases/download/${TAG}/${LIB_ASSET}"
+$DL_OUT "${TMPDIR}/${LIB_ASSET}" "$LIB_URL" 2>/dev/null || true
+
+if [ -s "${TMPDIR}/${LIB_ASSET}" ]; then
+    tar xzf "${TMPDIR}/${LIB_ASSET}" -C "$TMPDIR"
+    if [ -f "${TMPDIR}/libdelegate_shell.a" ]; then
+        if [ -w "$(dirname "$LIB_DIR")" ]; then
+            mkdir -p "$LIB_DIR"
+            mv "${TMPDIR}/libdelegate_shell.a" "$LIB_DIR/"
+        else
+            sudo mkdir -p "$LIB_DIR"
+            sudo mv "${TMPDIR}/libdelegate_shell.a" "$LIB_DIR/"
+        fi
+        echo "AOT runtime library installed to ${LIB_DIR}/"
+    fi
+fi
+
 rm -rf "$TMPDIR"
 
 echo "dgsh ${TAG} installed to ${INSTALL_DIR}/dgsh"

@@ -61,31 +61,56 @@ fn find_runtime_lib() -> Result<String, String> {
         }
     }
 
-    // 2. Try target/release
-    let candidates = [
-        "target/release/libdelegate_shell.a",
-        "target/debug/libdelegate_shell.a",
+    // 2. Platform-specific standard install paths
+    let lib_name = if cfg!(target_os = "windows") {
+        "delegate_shell.lib"
+    } else {
+        "libdelegate_shell.a"
+    };
+
+    let mut standard_paths: Vec<std::path::PathBuf> = Vec::new();
+
+    if cfg!(target_os = "windows") {
+        // %LOCALAPPDATA%\dgsh\
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            standard_paths.push(std::path::PathBuf::from(local).join("dgsh").join(lib_name));
+        }
+        // %ProgramFiles%\dgsh\
+        if let Ok(pf) = std::env::var("ProgramFiles") {
+            standard_paths.push(std::path::PathBuf::from(pf).join("dgsh").join(lib_name));
+        }
+    } else {
+        // Linux + macOS
+        standard_paths.push(std::path::PathBuf::from("/usr/local/lib/dgsh").join(lib_name));
+        standard_paths.push(std::path::PathBuf::from("/usr/lib/dgsh").join(lib_name));
+    }
+
+    // ~/.dgsh/lib/ (all platforms)
+    if let Ok(home) = std::env::var(if cfg!(target_os = "windows") { "USERPROFILE" } else { "HOME" }) {
+        standard_paths.push(std::path::PathBuf::from(home).join(".dgsh").join("lib").join(lib_name));
+    }
+
+    for p in &standard_paths {
+        if p.exists() {
+            return Ok(p.to_string_lossy().to_string());
+        }
+    }
+
+    // 3. Try target/release (development)
+    let dev_candidates = [
+        format!("target/release/{lib_name}"),
+        format!("target/debug/{lib_name}"),
     ];
-    for c in &candidates {
+    for c in &dev_candidates {
         if std::path::Path::new(c).exists() {
             return Ok(c.to_string());
         }
     }
 
-    // 3. Try current working directory
-    if let Ok(cwd) = std::env::current_dir() {
-        let candidate = cwd.join("libdelegate_shell.a");
-        if candidate.exists() {
-            return Ok(candidate.to_string_lossy().to_string());
-        }
-    }
-
-    Err(
-        "Cannot find libdelegate_shell.a runtime library.\n\
-         Build it with: cargo build --release\n\
-         The library should be at target/release/libdelegate_shell.a"
-            .to_string(),
-    )
+    Err(format!(
+        "Cannot find {lib_name} runtime library.\n\
+         Install it or build from source with: cargo build --release"
+    ))
 }
 
 /// Detect an available system linker.

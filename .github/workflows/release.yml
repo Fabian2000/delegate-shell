@@ -50,11 +50,20 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
+      - name: Build library (for AOT compilation)
+        run: cargo build --release --lib --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
           tar czf ../../../${{ matrix.name }}.tar.gz dgsh
+          cd ../../..
+          LIB_NAME=$(echo "${{ matrix.name }}" | sed 's/dgsh/libdelegate_shell/')
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${LIB_NAME}.tar.gz libdelegate_shell.a
           cd ../../..
 
       - name: Package (Windows)
@@ -63,12 +72,22 @@ jobs:
           cd target/${{ matrix.target }}/release
           7z a ../../../${{ matrix.name }}.zip dgsh.exe
           cd ../../..
+          $LIB_NAME = "${{ matrix.name }}" -replace "dgsh","libdelegate_shell"
+          cd target/${{ matrix.target }}/release
+          7z a ../../../${LIB_NAME}.zip delegate_shell.lib
+          cd ../../..
 
-      - name: Upload artifact
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}.*
+
+      - name: Upload library artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-lib
+          path: libdelegate_shell*.*
 
   release:
     needs: build
