@@ -27,7 +27,7 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
             .map_err(|_| format!("Environment variable '{key}' not set"))
     })?;
 
-    reg.add("exit", &[Param::Optional(Type::Int)], Type::Void, builtin_exit)?;
+    reg.add_interp("exit", &[Param::Optional(Type::Int)], Type::Void, builtin_exit)?;
 
     reg.add("os", &[], Type::String, |_args| {
         let os = if cfg!(target_os = "windows") { "windows" }
@@ -105,7 +105,7 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
 
 // --- Named functions (complex logic) ---
 
-fn builtin_exit(args: &[Value]) -> Result<Value, String> {
+fn builtin_exit(args: &[Value], interp: &mut crate::interpreter::Runtime) -> Result<Value, String> {
     let code = if args.is_empty() {
         0
     } else if let Some(n) = args[0].as_int() {
@@ -113,7 +113,14 @@ fn builtin_exit(args: &[Value]) -> Result<Value, String> {
     } else {
         return Err(format!("expected int, got {}", args[0].type_name()));
     };
-    Err(format!("\x00EXIT\x00{}", code))
+    // Fire the "exit" event so user-registered handlers run before we go
+    // down. Then terminate the process directly — this works uniformly in
+    // tree-walk, VM, .dgbc, and AOT modes, none of which need to interpret
+    // a special error-string sentinel.
+    interp.fire_event("exit");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    std::process::exit(code);
 }
 
 fn builtin_which(args: &[Value]) -> Result<Value, String> {

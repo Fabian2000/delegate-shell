@@ -246,14 +246,17 @@ pub fn compile_chunks_to_object(chunks: &[Chunk], teach_source: &str) -> Result<
     let mut module = ObjectModule::new(builder);
     let mut builder_ctx = FunctionBuilderContext::new();
 
-    // Compile each chunk as a named function
+    // Compile each chunk as a named function.
+    // Chunk 0 is the top-level entry: no params. All other chunks are callable
+    // user functions and take their declared params plus a depth counter —
+    // including arity-0 functions like `f()`, which still receive the depth
+    // arg from the caller.
     let mut chunk_func_ids = Vec::new();
     for (idx, chunk) in chunks.iter().enumerate() {
         let func_name = format!("dgsh_chunk_{}", idx);
 
-        // Build signature: for chunk 0 (top-level), no params; for others, params + depth
         let mut sig = module.make_signature();
-        if chunk.param_count > 0 {
+        if idx != 0 {
             for _ in 0..chunk.param_count {
                 sig.params.push(AbiParam::new(types::I64));
             }
@@ -271,7 +274,7 @@ pub fn compile_chunks_to_object(chunks: &[Chunk], teach_source: &str) -> Result<
         let func_id = chunk_func_ids[idx];
         // Rebuild signature (same as when we declared it)
         let mut sig = module.make_signature();
-        if chunk.param_count > 0 {
+        if idx != 0 {
             for _ in 0..chunk.param_count {
                 sig.params.push(AbiParam::new(types::I64));
             }
@@ -294,7 +297,7 @@ pub fn compile_chunks_to_object(chunks: &[Chunk], teach_source: &str) -> Result<
         }
 
         let mut builder = FunctionBuilder::new(&mut func, &mut builder_ctx);
-        let ok = compile_chunk(&mut builder, chunk, self_ref, &helpers, idx, &chunk_refs);
+        let ok = compile_chunk(&mut builder, chunk, self_ref, &helpers, idx, &chunk_refs, chunks);
         builder.finalize();
 
         if !ok {
@@ -597,8 +600,10 @@ fn emit_int_binop(
 
 /// Compile a single bytecode chunk to Cranelift IR.
 ///
-/// For chunk 0 (top-level, param_count == 0): no params, no depth check.
-/// For function chunks (param_count > 0): params + depth counter, with recursion guard.
+/// For chunk 0 (top-level): no params, no depth check.
+/// For function chunks (any arity, including 0): params + depth counter, with
+/// recursion guard. Top-level is identified by chunk index, NOT by param count
+/// — a parameterless user function `f()` is still a callable function chunk.
 fn compile_chunk(
     builder: &mut FunctionBuilder,
     chunk: &Chunk,
@@ -606,10 +611,11 @@ fn compile_chunk(
     helpers: &HelperRefs,
     chunk_idx: usize,
     chunk_refs: &HashMap<usize, cranelift_codegen::ir::FuncRef>,
+    all_chunks: &[Chunk],
 ) -> bool {
     let code = &chunk.code;
     let void_raw = Value::void().raw();
-    let is_top_level = chunk.param_count == 0;
+    let is_top_level = chunk_idx == 0;
 
     // --- Phase 1: Pre-scan for jump targets ---
     let mut jump_targets: HashSet<usize> = HashSet::new();
@@ -1276,6 +1282,17 @@ fn compile_chunk(
                     match vstack.pop() { Some(v) => args.push(v), None => return false }
                 }
                 args.reverse();
+                // Pad missing optional params with void, mirroring the VM's
+                // CallLocal semantics (machine.rs around the "Pad missing
+                // optional params" comment). Without this, calling a function
+                // with fewer args than its param_count produces a signature
+                // mismatch at the Cranelift verifier.
+                let expected = all_chunks.get(target).map(|c| c.param_count as usize).unwrap_or(argc);
+                let void_const = Value::void().raw() as i64;
+                for _ in args.len()..expected {
+                    let v = builder.ins().iconst(types::I64, void_const);
+                    args.push(v);
+                }
                 if target == chunk_idx {
                     // Self-recursive call
                     let cur_depth = builder.use_var(depth_var);
