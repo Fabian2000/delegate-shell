@@ -1,8 +1,22 @@
 use std::process::{Command, Stdio};
 use std::io::Write;
+use std::sync::OnceLock;
 use indexmap::IndexMap;
 use crate::interpreter::value::{Value, ValueKind as VK, new_list};
 use super::registry::{BuiltinRegistry, Param, Type};
+
+/// Script-level arguments populated by `main.rs` before script execution.
+/// `args()` reads from here so that runtime flags like `--vm` don't leak into
+/// the user's argument list.
+static SCRIPT_ARGS: OnceLock<Vec<String>> = OnceLock::new();
+
+/// Set the script's command-line arguments. Idempotent: the first call wins —
+/// subsequent calls (e.g. from spawned threads or nested invocations) are
+/// ignored. Call this from the CLI entry point after stripping interpreter
+/// flags and the script path itself.
+pub fn set_script_args(args: Vec<String>) {
+    let _ = SCRIPT_ARGS.set(args);
+}
 
 pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     reg.add("env", &[Param::Required(Type::String)], Type::String, |args| {
@@ -59,10 +73,10 @@ pub fn register(reg: &mut BuiltinRegistry) -> Result<(), String> {
     reg.add("which", &[Param::Required(Type::String)], Type::String, builtin_which)?;
 
     reg.add("args", &[], Type::List, |_args| {
-        let args: Vec<Value> = std::env::args().skip(2)
-            .map(|s| Value::string_from(&s))
-            .collect();
-        Ok(new_list(args))
+        let values: Vec<Value> = SCRIPT_ARGS.get()
+            .map(|v| v.iter().map(|s| Value::string_from(s)).collect())
+            .unwrap_or_default();
+        Ok(new_list(values))
     })?;
 
     reg.add("input", &[Param::Required(Type::String)], Type::String, builtin_input)?;

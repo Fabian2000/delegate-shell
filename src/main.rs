@@ -29,11 +29,50 @@ fn main() {
         return;
     }
     if let Some(compile_idx) = raw_args.iter().position(|a| a == "--compile") {
-        if compile_idx + 1 >= raw_args.len() {
-            eprintln!("Usage: dgsh --compile <script.dgsh>");
+        let next = raw_args.get(compile_idx + 1).map(|s| s.as_str());
+        if next == Some("bc") {
+            // --compile bc: compile to bytecode file with bundled imports
+            let script_idx = compile_idx + 2;
+            if script_idx >= raw_args.len() {
+                eprintln!("Usage: dgsh --compile bc <script.dgsh>");
+                std::process::exit(1);
+            }
+            let script = &raw_args[script_idx];
+            let source = match fs::read_to_string(script) {
+                Ok(content) => content,
+                Err(e) => { eprintln!("Error reading '{}': {}", script, e); std::process::exit(1); }
+            };
+            let mut lexer = delegate_shell::lexer::Lexer::new(&source);
+            let tokens = lexer.tokenize();
+            let stmts = match delegate_shell::parser::parse(&tokens) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("Parse error: {e}"); std::process::exit(1); }
+            };
+            let script_dir = std::path::Path::new(script).parent().unwrap_or(std::path::Path::new("."));
+            let stmts = match resolve_imports(stmts, script_dir, &mut std::collections::HashSet::new()) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("Import error: {e}"); std::process::exit(1); }
+            };
+            let chunks = match delegate_shell::vm::compiler::Compiler::compile(&stmts) {
+                Ok(c) => c,
+                Err(e) => { eprintln!("Compile error: {e}"); std::process::exit(1); }
+            };
+            let bytes = delegate_shell::vm::bytecode::serialize_chunks(&chunks);
+            let out_path = script.trim_end_matches(".dgsh").to_string() + ".dgbc";
+            if let Err(e) = fs::write(&out_path, &bytes) {
+                eprintln!("Error writing '{}': {}", out_path, e);
+                std::process::exit(1);
+            }
+            println!("Compiled to: {} ({} bytes)", out_path, bytes.len());
+            return;
+        }
+        // --compile / --compile exe: AOT compile to native binary
+        let script_idx = if next == Some("exe") { compile_idx + 2 } else { compile_idx + 1 };
+        if script_idx >= raw_args.len() {
+            eprintln!("Usage: dgsh --compile [exe|bc] <script.dgsh>");
             std::process::exit(1);
         }
-        let script = &raw_args[compile_idx + 1];
+        let script = &raw_args[script_idx];
         let source = match fs::read_to_string(script) {
             Ok(content) => content,
             Err(e) => {
@@ -61,8 +100,44 @@ fn main() {
         return;
     }
 
+    // Script-level arguments come after the entry token (script path, -c, or
+    // -migrate). For -c, the entry token is followed by the code string, then
+    // the script args; for everything else, args come straight after the entry.
+    let script_args: Vec<String> = if args[1] == "-c" {
+        args.iter().skip(3).cloned().collect()
+    } else {
+        args.iter().skip(2).cloned().collect()
+    };
+    delegate_shell::builtins::set_script_args(script_args);
+
     if args[1] == "-migrate" {
         run_migrate(&args);
+        return;
+    }
+
+    // .dgbc files: run bytecode directly (VM, JIT if available)
+    if args[1].ends_with(".dgbc") {
+        let data = match fs::read(&args[1]) {
+            Ok(d) => d,
+            Err(e) => { eprintln!("Error reading '{}': {}", args[1], e); std::process::exit(1); }
+        };
+        let chunks = match delegate_shell::vm::bytecode::deserialize_chunks(&data) {
+            Some(c) => c,
+            None => { eprintln!("Invalid bytecode file: {}", args[1]); std::process::exit(1); }
+        };
+        let mut engine = make_engine(&raw_args);
+        engine.cancel_flag = Some(&CANCELLED);
+        // Auto-mode: JIT if beneficial and available, VM otherwise
+        let chosen = delegate_shell::vm::auto_mode::choose_mode(&chunks);
+        if chosen == delegate_shell::ExecutionMode::Jit {
+            let _ = engine.set_execution_mode(delegate_shell::ExecutionMode::Jit);
+        }
+        let mut vm = delegate_shell::vm::machine::VM::new();
+        if let Err(e) = vm.execute(chunks, &mut engine) {
+            eprintln!("Runtime error: {e}");
+            std::process::exit(1);
+        }
+        engine.fire_event("exit");
         return;
     }
 
@@ -203,6 +278,37 @@ fn read_debug_key() -> u8 {
     key
 }
 
+fn resolve_imports(
+    stmts: Vec<delegate_shell::parser::ast::Stmt>,
+    base_dir: &std::path::Path,
+    seen: &mut std::collections::HashSet<std::path::PathBuf>,
+) -> Result<Vec<delegate_shell::parser::ast::Stmt>, String> {
+    use delegate_shell::parser::ast::StmtKind;
+    let mut result = Vec::new();
+    for stmt in stmts {
+        if let StmtKind::Import(ref path) = stmt.kind {
+            let full = base_dir.join(path);
+            let canonical = full.canonicalize()
+                .map_err(|e| format!("Cannot resolve import '{}': {}", path, e))?;
+            if !seen.insert(canonical.clone()) {
+                continue;
+            }
+            let source = std::fs::read_to_string(&canonical)
+                .map_err(|e| format!("Cannot read '{}': {}", path, e))?;
+            let mut lexer = delegate_shell::lexer::Lexer::new(&source);
+            let tokens = lexer.tokenize();
+            let imported = delegate_shell::parser::parse(&tokens)
+                .map_err(|e| format!("Parse error in '{}': {}", path, e))?;
+            let import_dir = canonical.parent().unwrap_or(base_dir);
+            let resolved = resolve_imports(imported, import_dir, seen)?;
+            result.extend(resolved);
+        } else {
+            result.push(stmt);
+        }
+    }
+    Ok(result)
+}
+
 fn print_help() {
     eprintln!("Usage: dgsh [options] [script.dgsh]");
     eprintln!();
@@ -212,7 +318,9 @@ fn print_help() {
     eprintln!("  --vm            Force bytecode VM execution");
     eprintln!("  --jit           Force JIT compilation");
     eprintln!("  --tw            Force tree-walk interpretation");
-    eprintln!("  --compile <file> Compile script to standalone native binary");
+    eprintln!("  --compile <file>      Compile to native binary (same as --compile exe)");
+    eprintln!("  --compile exe <file>  Compile to native binary");
+    eprintln!("  --compile bc <file>   Compile to bytecode file (.dgbc)");
     eprintln!("  --mcp           Start MCP server (Model Context Protocol over stdio)");
     eprintln!("  --version, -v   Show version");
     eprintln!("  --help, -h      Show this help");

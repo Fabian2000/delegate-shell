@@ -28,7 +28,7 @@ struct TryPoint {
 pub struct VM {
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<CallFrame>,
-    pub(crate) chunks: Vec<Chunk>,
+    pub chunks: Vec<Chunk>,
     globals: Vec<Value>,
     /// Reverse mapping: global slot index → variable name (for error messages & lambda lookup)
     global_names: Vec<Rc<str>>,
@@ -95,6 +95,12 @@ impl VM {
         if interp.is_jit_mode() {
             self.jit = Some(super::jit::JitManager::new(chunk_count));
         }
+        // Set VM context so builtins can call back into VM-registered user
+        // functions (inline lambdas, callbacks). Needed for all VM modes.
+        let vm_ptr: *mut VM = self;
+        let interp_ptr: *mut Runtime = interp;
+        let chunks_ptr: *const Vec<Chunk> = &self.chunks;
+        super::jit::set_jit_context(vm_ptr, interp_ptr, chunks_ptr, 0);
         self.frames.push(CallFrame { chunk_idx: 0, ip: 0, base: 0 });
         self.run(interp)
     }

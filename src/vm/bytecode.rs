@@ -468,8 +468,13 @@ impl Chunk {
 }
 
 /// Serialize a vector of chunks to bytes.
+const DGBC_MAGIC: &[u8; 4] = b"DGBC";
+const BYTECODE_VERSION: u16 = 1;
+
 pub fn serialize_chunks(chunks: &[Chunk]) -> Vec<u8> {
     let mut buf = Vec::new();
+    buf.extend_from_slice(DGBC_MAGIC);
+    buf.extend_from_slice(&BYTECODE_VERSION.to_le_bytes());
     buf.extend_from_slice(&(chunks.len() as u32).to_le_bytes());
     for chunk in chunks {
         let chunk_bytes = chunk.serialize();
@@ -482,8 +487,16 @@ pub fn serialize_chunks(chunks: &[Chunk]) -> Vec<u8> {
 /// Deserialize a vector of chunks from bytes.
 pub fn deserialize_chunks(data: &[u8]) -> Option<Vec<Chunk>> {
     let mut pos = 0;
-    if data.len() < 4 { return None; }
-    let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if data.len() >= 6 && &data[0..4] == DGBC_MAGIC {
+        let version = u16::from_le_bytes([data[4], data[5]]);
+        if version != BYTECODE_VERSION {
+            eprintln!("Bytecode version mismatch: file is v{}, expected v{}", version, BYTECODE_VERSION);
+            return None;
+        }
+        pos = 6;
+    }
+    if pos + 4 > data.len() { return None; }
+    let count = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
     pos += 4;
     let mut chunks = Vec::with_capacity(count);
     for _ in 0..count {

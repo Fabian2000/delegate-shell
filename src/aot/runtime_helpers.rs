@@ -25,6 +25,10 @@ struct AotContext {
 /// Sets up thread-local pointers so JIT helper functions can access VM/Runtime.
 #[unsafe(no_mangle)]
 pub extern "C" fn dgsh_aot_init(chunks_data: *const u8, chunks_len: u64) -> *mut std::ffi::c_void {
+    // Forward command-line arguments to the args() builtin. For an AOT binary
+    // argv[0] is the binary path and everything after is a script argument.
+    crate::builtins::set_script_args(std::env::args().skip(1).collect());
+
     // Deserialize chunks from embedded data
     let data = unsafe { std::slice::from_raw_parts(chunks_data, chunks_len as usize) };
     let chunks_vec = bytecode::deserialize_chunks(data).unwrap_or_else(|| {

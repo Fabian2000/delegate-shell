@@ -17,3 +17,4 @@ mod process;
 mod dispatch;
 
 pub use registry::BuiltinRegistry;
+pub use system::set_script_args;
