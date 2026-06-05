@@ -87,7 +87,11 @@ pub struct ObjectData {
 pub struct LambdaData {
     pub name: String,
     pub resolution: u8,
+    /// Explicit pre-bound args (from `@fn(args)`), filling LEADING params.
     pub bound_args: Vec<Value>,
+    /// Captured values from inline lambdas (`@(p) body` where body uses outer
+    /// vars), filling TRAILING params. Snapshotted at creation time.
+    pub captures: Vec<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -176,7 +180,7 @@ pub enum SendableValue {
     List(Vec<Self>),
     Object(IndexMap<String, Self>),
     Void,
-    Lambda { name: String, resolution: u8, bound_args: Vec<Self> },
+    Lambda { name: String, resolution: u8, bound_args: Vec<Self>, captures: Vec<Self> },
     CommandResult { status: i32, out: String, err: String },
     Bytes(Vec<u8>),
     Handle(u64),
@@ -750,6 +754,7 @@ impl Value {
             return SendableValue::Lambda {
                 name: d.name.clone(), resolution: d.resolution,
                 bound_args: d.bound_args.iter().map(Value::to_sendable).collect(),
+                captures: d.captures.iter().map(Value::to_sendable).collect(),
             };
         }
         if let Some(d) = self.as_command_result() {
@@ -778,8 +783,10 @@ impl Value {
             SendableValue::Void => Self::void(),
             SendableValue::List(items) => Self::new_list(items.into_iter().map(Self::from_sendable).collect()),
             SendableValue::Object(m) => Self::new_object(m.into_iter().map(|(k, v)| (k, Self::from_sendable(v))).collect()),
-            SendableValue::Lambda { name, resolution, bound_args } => Self::lambda(LambdaData {
-                name, resolution, bound_args: bound_args.into_iter().map(Self::from_sendable).collect(),
+            SendableValue::Lambda { name, resolution, bound_args, captures } => Self::lambda(LambdaData {
+                name, resolution,
+                bound_args: bound_args.into_iter().map(Self::from_sendable).collect(),
+                captures: captures.into_iter().map(Self::from_sendable).collect(),
             }),
             SendableValue::CommandResult { status, out, err } => Self::command_result(CommandResultData { status, out, err }),
             SendableValue::Bytes(b) => Self::bytes(b),

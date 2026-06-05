@@ -656,7 +656,7 @@ fn compile_chunk(
                 Op::SubLocalImm | Op::AddLocalImm => pc += 10,
                 Op::Call => pc += 4,
                 Op::CallLocal | Op::CallBuiltin => pc += 3,
-                Op::MakeLambda => pc += 4,
+                Op::MakeLambda => pc += 5,
                 Op::ErrorField | Op::Alias | Op::Use => pc += 4,
                 Op::DefineFunction => pc += 4,
                 Op::DefineEnum => {
@@ -827,7 +827,7 @@ fn compile_chunk(
                 | Op::TryBegin | Op::TryEnd => pc += 4,
                 Op::Call => pc += 4,
                 Op::CallLocal | Op::CallBuiltin => pc += 3,
-                Op::MakeLambda => pc += 4,
+                Op::MakeLambda => pc += 5,
                 Op::ErrorField | Op::Alias | Op::Use | Op::DefineFunction => pc += 4,
                 Op::DefineEnum => {
                     pc += 2;
@@ -1595,6 +1595,16 @@ fn compile_chunk(
                 let name_idx = chunk.read_u16(pc) as u64; pc += 2;
                 let res = code[pc] as u64; pc += 1;
                 let bound_count = code[pc] as usize; pc += 1;
+                let captures_count = code[pc] as usize; pc += 1;
+                // TODO: closure captures for AOT are not yet implemented —
+                // pop the values off the IR stack so the rest of the chunk
+                // still type-checks; the resulting lambda will run without
+                // captures, so inline `@(p) body` patterns that reach AOT
+                // may resolve `p` as undefined at call time. TW + VM modes
+                // do the full closure binding.
+                for _ in 0..captures_count {
+                    if vstack.pop().is_none() { return false; }
+                }
                 let mut bound_args = Vec::new();
                 for _ in 0..bound_count {
                     match vstack.pop() { Some(v) => bound_args.push(v), None => return false }

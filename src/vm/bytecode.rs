@@ -469,7 +469,8 @@ impl Chunk {
 
 /// Serialize a vector of chunks to bytes.
 const DGBC_MAGIC: &[u8; 4] = b"DGBC";
-const BYTECODE_VERSION: u16 = 1;
+// v2 added a captures_count byte to Op::MakeLambda for closure capture support.
+const BYTECODE_VERSION: u16 = 2;
 
 pub fn serialize_chunks(chunks: &[Chunk]) -> Vec<u8> {
     let mut buf = Vec::new();

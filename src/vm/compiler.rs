@@ -345,9 +345,12 @@ impl Compiler {
                 self.compile_expr(right)?;
                 self.chunk.emit(Op::PopSendCtx, line);
             }
-            ExprKind::Lambda { name, resolution, bound_args } => {
+            ExprKind::Lambda { name, resolution, bound_args, captures } => {
                 for arg in bound_args {
                     self.compile_expr(arg)?;
+                }
+                for cap in captures {
+                    self.compile_expr(cap)?;
                 }
                 let name_idx = self.chunk.constants.add(name);
                 let res = match resolution {
@@ -359,6 +362,7 @@ impl Compiler {
                 self.chunk.code.extend_from_slice(&name_idx.to_le_bytes());
                 self.chunk.code.push(res);
                 self.chunk.code.push(bound_args.len() as u8);
+                self.chunk.code.push(captures.len() as u8);
             }
             ExprKind::DollarRef(dref) => {
                 match dref {

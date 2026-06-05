@@ -1,6 +1,80 @@
 use crate::lexer::token::{Token, SpannedToken, Span};
 use crate::parser::ast::{Expr, ExprKind, UnaryOp, DollarRef, BinOp, Resolution, StringPart, Stmt, StmtKind};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Collect free identifiers in an expression, excluding names bound by the
+/// enclosing inline-lambda's own parameters. Used at desugaring time to derive
+/// captures. Walks all sub-expressions of all ExprKind variants. Conservative:
+/// includes every Ident reference that isn't a lambda param — at lambda
+/// creation time, the runtime resolves each via the normal scope walk.
+fn collect_free_idents(expr: &Expr, lambda_params: &HashSet<String>, out: &mut Vec<String>, seen: &mut HashSet<String>) {
+    match &expr.kind {
+        ExprKind::Ident(name) => {
+            if !lambda_params.contains(name) && seen.insert(name.clone()) {
+                out.push(name.clone());
+            }
+        }
+        ExprKind::ErrorCheck(name) | ExprKind::OptionalCheck(name) => {
+            if !lambda_params.contains(name) && seen.insert(name.clone()) {
+                out.push(name.clone());
+            }
+        }
+        ExprKind::ErrorField { name, .. } => {
+            if !lambda_params.contains(name) && seen.insert(name.clone()) {
+                out.push(name.clone());
+            }
+        }
+        ExprKind::PostIncDec { name, .. } | ExprKind::PreIncDec { name, .. } => {
+            if !lambda_params.contains(name) && seen.insert(name.clone()) {
+                out.push(name.clone());
+            }
+        }
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::VoidLit | ExprKind::DollarRef(_) => {}
+        ExprKind::String(parts) => {
+            for p in parts {
+                if let StringPart::Expr(e) = p {
+                    collect_free_idents(e, lambda_params, out, seen);
+                }
+            }
+        }
+        ExprKind::List(items) => {
+            for e in items { collect_free_idents(e, lambda_params, out, seen); }
+        }
+        ExprKind::Object(fields) => {
+            for (_, e) in fields { collect_free_idents(e, lambda_params, out, seen); }
+        }
+        ExprKind::BinaryOp { left, right, .. } => {
+            collect_free_idents(left, lambda_params, out, seen);
+            collect_free_idents(right, lambda_params, out, seen);
+        }
+        ExprKind::UnaryOp { expr, .. } => collect_free_idents(expr, lambda_params, out, seen),
+        ExprKind::Call { args, .. } => {
+            for e in args { collect_free_idents(e, lambda_params, out, seen); }
+        }
+        ExprKind::Index { expr, index } => {
+            collect_free_idents(expr, lambda_params, out, seen);
+            collect_free_idents(index, lambda_params, out, seen);
+        }
+        ExprKind::FieldAccess { expr, .. } => collect_free_idents(expr, lambda_params, out, seen),
+        ExprKind::Range { start, end } => {
+            collect_free_idents(start, lambda_params, out, seen);
+            collect_free_idents(end, lambda_params, out, seen);
+        }
+        ExprKind::Send { left, right } | ExprKind::SafeSend { left, right } => {
+            collect_free_idents(left, lambda_params, out, seen);
+            collect_free_idents(right, lambda_params, out, seen);
+        }
+        ExprKind::Lambda { bound_args, captures, .. } => {
+            // Nested lambdas: their own captures field already resolves their
+            // free vars at *their* creation time, but those creation sites
+            // live in our scope — so we still need to include them here.
+            for e in bound_args { collect_free_idents(e, lambda_params, out, seen); }
+            for e in captures { collect_free_idents(e, lambda_params, out, seen); }
+        }
+        ExprKind::Atomic(e) => collect_free_idents(e, lambda_params, out, seen),
+    }
+}
 
 static LAMBDA_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -472,6 +546,21 @@ impl<'a> ExprParser<'a> {
             let body_expr = self.parse_expr(0)?;
             let body_span = body_expr.span;
             let lambda_name = next_lambda_name();
+
+            // Collect free variables in the body — identifiers that are NOT
+            // among the lambda's own parameters. These become implicit trailing
+            // params on the synthetic function, snapshotted at creation time.
+            let param_names: HashSet<String> = params.iter().map(|(n, _, _)| n.clone()).collect();
+            let mut free_vars: Vec<String> = Vec::new();
+            let mut seen: HashSet<String> = HashSet::new();
+            collect_free_idents(&body_expr, &param_names, &mut free_vars, &mut seen);
+
+            // Extend the synthetic fn's params with the captures (as dyn).
+            let mut all_params = params;
+            for cap in &free_vars {
+                all_params.push((cap.clone(), None, true));
+            }
+
             let body_stmt = Stmt {
                 kind: StmtKind::Return { expr: Some(body_expr), is_dyn: true },
                 span: body_span,
@@ -479,7 +568,7 @@ impl<'a> ExprParser<'a> {
             let fn_def = Stmt {
                 kind: StmtKind::FnDef {
                     name: lambda_name.clone(),
-                    params,
+                    params: all_params,
                     optional_params: Vec::new(),
                     return_type_ann: None,
                     body: vec![body_stmt],
@@ -487,9 +576,22 @@ impl<'a> ExprParser<'a> {
                 span,
             };
             self.synthetic_fns.push(fn_def);
+
+            // Build capture expressions — plain Ident references resolved at
+            // lambda-creation time in the enclosing scope.
+            let captures: Vec<Expr> = free_vars.into_iter().map(|n| Expr {
+                kind: ExprKind::Ident(n),
+                span,
+            }).collect();
+
             let end = body_span.end;
             return Ok(Expr {
-                kind: ExprKind::Lambda { name: lambda_name, resolution: Resolution::Normal, bound_args: Vec::new() },
+                kind: ExprKind::Lambda {
+                    name: lambda_name,
+                    resolution: Resolution::Normal,
+                    bound_args: Vec::new(),
+                    captures,
+                },
                 span: Span { start: span.start, end },
             });
         }
@@ -513,7 +615,7 @@ impl<'a> ExprParser<'a> {
             }
             let end = self.peek_span().start;
             Ok(Expr {
-                kind: ExprKind::Lambda { name, resolution, bound_args },
+                kind: ExprKind::Lambda { name, resolution, bound_args, captures: Vec::new() },
                 span: Span { start: span.start, end },
             })
         } else {

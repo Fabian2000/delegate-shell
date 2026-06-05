@@ -699,12 +699,12 @@ impl VM {
                         if let Some(data) = val.as_lambda() {
                             lambda_found = true;
                             let arg_start = self.stack.len() - argc as usize;
-                            let call_args: Vec<Value> = if data.bound_args.is_empty() {
-                                self.stack.drain(arg_start..).collect()
-                            } else {
-                                self.stack.truncate(arg_start);
-                                data.bound_args.clone()
-                            };
+                            let user_args: Vec<Value> = self.stack.drain(arg_start..).collect();
+                            // bound_args (leading) + user_args (middle) + captures (trailing)
+                            let mut call_args: Vec<Value> = Vec::with_capacity(data.bound_args.len() + user_args.len() + data.captures.len());
+                            call_args.extend(data.bound_args.iter().cloned());
+                            call_args.extend(user_args);
+                            call_args.extend(data.captures.iter().cloned());
                             let resolution = match data.resolution {
                                 1 => Resolution::OwnFirst,
                                 2 => Resolution::SystemOnly,
@@ -736,12 +736,11 @@ impl VM {
                     if let Some(val) = global_val
                         && let Some(data) = val.as_lambda() {
                             let arg_start = self.stack.len() - argc as usize;
-                            let call_args: Vec<Value> = if data.bound_args.is_empty() {
-                                self.stack.drain(arg_start..).collect()
-                            } else {
-                                self.stack.truncate(arg_start);
-                                data.bound_args.clone()
-                            };
+                            let user_args: Vec<Value> = self.stack.drain(arg_start..).collect();
+                            let mut call_args: Vec<Value> = Vec::with_capacity(data.bound_args.len() + user_args.len() + data.captures.len());
+                            call_args.extend(data.bound_args.iter().cloned());
+                            call_args.extend(user_args);
+                            call_args.extend(data.captures.iter().cloned());
                             let resolution = match data.resolution {
                                 1 => Resolution::OwnFirst,
                                 2 => Resolution::SystemOnly,
@@ -1068,13 +1067,18 @@ impl VM {
                     let name_idx = read_u16!();
                     let res = read_u8!();
                     let bound_count = read_u8!() as usize;
+                    let captures_count = read_u8!() as usize;
                     let name = self.chunks[ci!()].constants.get(name_idx).clone();
-                    let start = self.stack.len() - bound_count;
-                    let bound_args: Vec<Value> = self.stack.drain(start..).collect();
+                    // Stack layout (bottom to top): [bound_args..., captures...]
+                    let captures_start = self.stack.len() - captures_count;
+                    let captures: Vec<Value> = self.stack.drain(captures_start..).collect();
+                    let bound_start = self.stack.len() - bound_count;
+                    let bound_args: Vec<Value> = self.stack.drain(bound_start..).collect();
                     self.stack.push(Value::lambda(crate::interpreter::value::LambdaData {
                         name: name.to_string(),
                         resolution: res,
                         bound_args,
+                        captures,
                     }));
                 }
 
@@ -1601,7 +1605,7 @@ fn patch_global_slots(code: &mut [u8], slot_remap: &std::collections::HashMap<u1
             | Op::TryBegin | Op::TryEnd => pc += 4,
             Op::Call => pc += 4,
             Op::CallBuiltin => pc += 3,
-            Op::MakeLambda => pc += 4,
+            Op::MakeLambda => pc += 5,
             Op::Alias | Op::Use => pc += 4,
             Op::GetLocal | Op::SetLocal
             | Op::LoadConst | Op::FieldGet | Op::FieldSet | Op::MakeList
@@ -1645,7 +1649,7 @@ fn patch_chunk_indices(code: &mut [u8], offset: u16) {
             | Op::TryBegin | Op::TryEnd => pc += 4,
             Op::Call => pc += 4,
             Op::CallBuiltin => pc += 3,
-            Op::MakeLambda => pc += 4,
+            Op::MakeLambda => pc += 5,
             Op::ErrorField | Op::Alias | Op::Use => pc += 4,
             Op::DefineEnum => {
                 pc += 2;

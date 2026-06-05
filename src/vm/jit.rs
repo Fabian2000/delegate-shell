@@ -666,10 +666,16 @@ unsafe extern "C" fn jit_make_lambda(
             })
             .collect();
 
+        // JIT/AOT MakeLambda fast-path: captures are emitted by the bytecode
+        // compiler as stack pushes prior to the call into jit_make_lambda only
+        // if the JIT codegen learns to forward them. Until then, lambdas that
+        // need closure capture fall back through the regular bytecode MakeLambda
+        // path (machine.rs), which does handle captures.
         let result = Value::lambda(crate::interpreter::value::LambdaData {
             name: name.to_string(),
             resolution: res as u8,
             bound_args,
+            captures: Vec::new(),
         });
         let raw = result.raw();
         std::mem::forget(result);

@@ -138,11 +138,15 @@ pub enum ExprKind {
         right: Box<Expr>,
     },
 
-    /// Lambda reference: @fn or @fn(args)
+    /// Lambda reference: @fn or @fn(args).
+    /// `bound_args` are explicit pre-applications that fill the leading params.
+    /// `captures` are free variables from inline `@(p) body` lambdas — appended
+    /// as trailing implicit params and snapshotted by value at creation time.
     Lambda {
         name: String,
         resolution: Resolution,
         bound_args: Vec<Expr>,
+        captures: Vec<Expr>,
     },
 
     /// Dollar reference in send context

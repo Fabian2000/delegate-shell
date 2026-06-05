@@ -1224,7 +1224,7 @@ impl Runtime {
             ExprKind::Range { start, end } => self.eval_range(start, end),
             ExprKind::Send { left, right } => self.eval_send(left, right),
             ExprKind::SafeSend { left, right } => self.eval_safe_send(left, right),
-            ExprKind::Lambda { name, resolution, bound_args } => self.eval_lambda(name, *resolution, bound_args),
+            ExprKind::Lambda { name, resolution, bound_args, captures } => self.eval_lambda(name, *resolution, bound_args, captures),
             ExprKind::ErrorCheck(name) => self.eval_error_check(name),
             ExprKind::ErrorField { name, field } => self.eval_error_field(name, field),
             ExprKind::DollarRef(dollar) => self.eval_dollar_ref(dollar),
@@ -1683,16 +1683,21 @@ impl Runtime {
         result
     }
 
-    fn eval_lambda(&mut self, name: &str, resolution: Resolution, bound_args: &[Expr]) -> Result<Value, String> {
-        let mut eval_args = Vec::with_capacity(bound_args.len());
-        for arg in bound_args {
-            // For lambda binding, preserve Atomic values (don't unwrap)
-            if let ExprKind::Ident(var_name) = &arg.kind {
-                eval_args.push(self.get_var_raw(var_name)?);
-            } else {
-                eval_args.push(self.eval_expr(arg)?);
+    fn eval_lambda(&mut self, name: &str, resolution: Resolution, bound_args: &[Expr], captures: &[Expr]) -> Result<Value, String> {
+        let eval_expr_list = |this: &mut Self, exprs: &[Expr]| -> Result<Vec<Value>, String> {
+            let mut out = Vec::with_capacity(exprs.len());
+            for arg in exprs {
+                // For lambda binding, preserve Atomic values (don't unwrap)
+                if let ExprKind::Ident(var_name) = &arg.kind {
+                    out.push(this.get_var_raw(var_name)?);
+                } else {
+                    out.push(this.eval_expr(arg)?);
+                }
             }
-        }
+            Ok(out)
+        };
+        let eval_bound = eval_expr_list(self, bound_args)?;
+        let eval_captures = eval_expr_list(self, captures)?;
         let res_code = match resolution {
             Resolution::Normal => 0,
             Resolution::OwnFirst => 1,
@@ -1701,7 +1706,8 @@ impl Runtime {
         Ok(Value::lambda(super::value::LambdaData {
             name: name.to_owned(),
             resolution: res_code,
-            bound_args: eval_args,
+            bound_args: eval_bound,
+            captures: eval_captures,
         }))
     }
 
@@ -1793,10 +1799,13 @@ impl Runtime {
     /// Returns an error if the lambda call fails.
     pub fn call_lambda(&mut self, lambda: &Value, args: Vec<Value>) -> Result<Value, String> {
         if let Some(data) = lambda.as_lambda() {
-            if !data.bound_args.is_empty() && !args.is_empty() {
-                return Err(format!("Lambda @{} already has bound args", data.name));
-            }
-            let call_args = if data.bound_args.is_empty() { args } else { data.bound_args.clone() };
+            // bound_args fill leading params, user-call args fill middle,
+            // captures fill trailing params. With captures we can't reject
+            // mixing of bound + user args anymore.
+            let mut call_args: Vec<Value> = Vec::with_capacity(data.bound_args.len() + args.len() + data.captures.len());
+            call_args.extend(data.bound_args.iter().cloned());
+            call_args.extend(args);
+            call_args.extend(data.captures.iter().cloned());
             let res = match data.resolution {
                 1 => Resolution::OwnFirst,
                 2 => Resolution::SystemOnly,
@@ -1825,10 +1834,10 @@ impl Runtime {
         if let Some(MaybeError::Ok(val)) = self.env.get(name)
             && let Some(data) = val.as_lambda() {
                 let data = data.clone();
-                if !data.bound_args.is_empty() && !args.is_empty() {
-                    return Err(format!("Lambda '{name}' already has bound args, cannot pass additional args"));
-                }
-                let call_args = if data.bound_args.is_empty() { args } else { data.bound_args };
+                let mut call_args: Vec<Value> = Vec::with_capacity(data.bound_args.len() + args.len() + data.captures.len());
+                call_args.extend(data.bound_args.iter().cloned());
+                call_args.extend(args);
+                call_args.extend(data.captures.iter().cloned());
                 let lambda_resolution = match data.resolution {
                     1 => Resolution::OwnFirst,
                     2 => Resolution::SystemOnly,
